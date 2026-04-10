@@ -49,7 +49,8 @@ impl Cohort {
                   c.groups,
                   c.created_by_id,
                   c.cohort_type,
-                  c.last_backfill_person_properties_at
+                  c.last_backfill_person_properties_at,
+                  c.last_backfill_events_at
               FROM posthog_cohort AS c
               JOIN posthog_team AS t ON (c.team_id = t.id)
             WHERE t.id = $1
