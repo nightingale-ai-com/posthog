@@ -724,6 +724,7 @@ pub async fn insert_cohort_for_team_in_pg(
     is_static: bool,
     cohort_type: Option<CohortType>,
     last_backfill_person_properties_at: Option<DateTime<Utc>>,
+    last_backfill_events_at: Option<DateTime<Utc>>,
 ) -> Result<Cohort, Error> {
     let cohort = Cohort {
         id: 0, // Placeholder, will be updated after insertion
@@ -743,13 +744,14 @@ pub async fn insert_cohort_for_team_in_pg(
         created_by_id: None,
         cohort_type,
         last_backfill_person_properties_at,
+        last_backfill_events_at,
     };
 
     let mut conn = client.get_connection().await?;
     let row: (i32,) = sqlx::query_as(
         r#"INSERT INTO posthog_cohort
-        (name, description, team_id, deleted, filters, query, version, pending_version, count, is_calculating, is_static, errors_calculating, groups, created_by_id, cohort_type, last_backfill_person_properties_at) VALUES
-        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        (name, description, team_id, deleted, filters, query, version, pending_version, count, is_calculating, is_static, errors_calculating, groups, created_by_id, cohort_type, last_backfill_person_properties_at, last_backfill_events_at) VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         RETURNING id"#,
     )
     .bind(&cohort.name)
@@ -768,6 +770,7 @@ pub async fn insert_cohort_for_team_in_pg(
     .bind(cohort.created_by_id)
     .bind(cohort.cohort_type)
     .bind(cohort.last_backfill_person_properties_at)
+    .bind(cohort.last_backfill_events_at)
     .fetch_one(&mut *conn)
     .await?;
 
@@ -1161,6 +1164,7 @@ impl TestContext {
             is_static,
             None,
             None,
+            None,
         )
         .await
     }
@@ -1173,6 +1177,7 @@ impl TestContext {
         is_static: bool,
         cohort_type: Option<CohortType>,
         last_backfill_person_properties_at: Option<DateTime<Utc>>,
+        last_backfill_events_at: Option<DateTime<Utc>>,
     ) -> Result<Cohort, Error> {
         insert_cohort_for_team_in_pg(
             self.non_persons_writer.clone(),
@@ -1182,6 +1187,7 @@ impl TestContext {
             is_static,
             cohort_type,
             last_backfill_person_properties_at,
+            last_backfill_events_at,
         )
         .await
     }

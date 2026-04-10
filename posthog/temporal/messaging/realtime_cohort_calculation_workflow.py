@@ -242,6 +242,7 @@ def _batch_update_cohort_metrics(cohort_durations: dict[int, int]) -> int:
 
     for cohort in all_cohorts:
         cohort.last_backfill_person_properties_at = now
+        cohort.last_backfill_events_at = now
 
         new_duration = cohort_durations[cohort.pk]
         previous_duration = cohort.last_calculation_duration_ms or 0
@@ -258,9 +259,11 @@ def _batch_update_cohort_metrics(cohort_durations: dict[int, int]) -> int:
             cohort.last_calculation_duration_ms = new_duration
             duration_updates_count += 1
 
-    # Single bulk_update for all cohorts — updates both last_backfill_person_properties_at and last_calculation_duration_ms
     if all_cohorts:
-        Cohort.objects.bulk_update(all_cohorts, ["last_backfill_person_properties_at", "last_calculation_duration_ms"])
+        Cohort.objects.bulk_update(
+            all_cohorts,
+            ["last_backfill_person_properties_at", "last_backfill_events_at", "last_calculation_duration_ms"],
+        )
 
     return duration_updates_count
 

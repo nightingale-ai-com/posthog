@@ -261,6 +261,7 @@ mod tests {
             created_by_id: None,
             cohort_type: None,
             last_backfill_person_properties_at: None,
+            last_backfill_events_at: None,
         }
     }
 
@@ -747,6 +748,7 @@ mod tests {
             created_by_id: None,
             cohort_type: None,
             last_backfill_person_properties_at: None,
+            last_backfill_events_at: None,
         };
         cohort_cache.cache.insert(1, vec![test_cohort]).await;
         // Moka caches update internal stats lazily - sync ensures stats are current
@@ -1109,6 +1111,7 @@ mod tests {
                         created_by_id: None,
                         cohort_type: None,
                         last_backfill_person_properties_at: None,
+                        last_backfill_events_at: None,
                     }])
                 }
             }

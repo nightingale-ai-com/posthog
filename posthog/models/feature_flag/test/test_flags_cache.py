@@ -3126,7 +3126,7 @@ class TestSerializeCohort(BaseTest):
         )
         result = _serialize_cohort(cohort)
 
-        # Hypercache/service cohort schema: these 17 fields must always be present in the serialized payload
+        # Hypercache/service cohort schema: these 18 fields must always be present in the serialized payload
         expected_fields = {
             "id",
             "name",
@@ -3145,6 +3145,7 @@ class TestSerializeCohort(BaseTest):
             "created_by_id",
             "cohort_type",
             "last_backfill_person_properties_at",
+            "last_backfill_events_at",
         }
         assert set(result.keys()) == expected_fields
         assert result["id"] == cohort.id
