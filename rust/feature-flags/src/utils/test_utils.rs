@@ -716,6 +716,7 @@ pub async fn insert_person_for_team_in_pg(
     Ok(person_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_cohort_for_team_in_pg(
     client: Arc<dyn Client + Send + Sync>,
     team_id: i32,
@@ -1169,6 +1170,7 @@ impl TestContext {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_cohort_with_type(
         &self,
         team_id: i32,
