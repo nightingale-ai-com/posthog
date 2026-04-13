@@ -333,6 +333,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)]
     fn test_uses_realtime_membership() {
         let backfill_ts = Some(Utc::now());
 
