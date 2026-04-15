@@ -43,6 +43,9 @@ class Ticket(UUIDTModel):
     channel_detail = models.CharField(max_length=30, choices=ChannelDetail.choices, null=True, blank=True)
     widget_session_id = models.CharField(max_length=64, db_index=True)  # Random UUID for access control
     distinct_id = models.CharField(max_length=400)  # PostHog distinct_id for Person linking only
+    identity_verified = models.BooleanField(
+        default=False
+    )  # HMAC-verified identity (vs just trusting distinct_id from frontend)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.NEW)
     priority = models.CharField(max_length=20, choices=Priority.choices, null=True, blank=True)
     anonymous_traits = models.JSONField(default=dict, blank=True)

@@ -163,6 +163,10 @@ class WidgetMessageView(APIView):
                 if ticket.distinct_id != distinct_id:
                     ticket.distinct_id = distinct_id
 
+                # Promote to verified when this request was HMAC-verified.
+                if verified_distinct_id is not None:
+                    ticket.identity_verified = True
+
                 # Update traits if provided
                 if traits:
                     ticket.anonymous_traits.update(traits)
@@ -178,6 +182,7 @@ class WidgetMessageView(APIView):
                 ticket.save(
                     update_fields=[
                         "distinct_id",
+                        "identity_verified",
                         "anonymous_traits",
                         "session_id",
                         "session_context",
@@ -201,6 +206,7 @@ class WidgetMessageView(APIView):
                 team=team,
                 widget_session_id=widget_session_id,
                 distinct_id=distinct_id,
+                identity_verified=verified_distinct_id is not None,
                 channel_source="widget",
                 channel_detail=widget_channel_detail,
                 status="new",
