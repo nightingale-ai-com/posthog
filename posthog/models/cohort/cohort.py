@@ -278,6 +278,9 @@ class Cohort(FileSystemSyncMixin, RootTeamMixin, models.Model):
         - Cohorts with person property filters require last_backfill_person_properties_at
         - Cohorts with behavioral event filters require last_backfill_events_at
         - Cohorts with both require both timestamps
+        - Cohorts with neither recognized filter type (empty filters, cohort-reference-only, etc.)
+          are not flag-compatible, even if stale timestamps are set, because HogQLRealtimeCohortQuery
+          cannot evaluate them.
         """
         if self.cohort_type != CohortType.REALTIME:
             return False
@@ -285,13 +288,15 @@ class Cohort(FileSystemSyncMixin, RootTeamMixin, models.Model):
         has_person_filters = self._has_filter_type("person")
         has_behavioral_filters = self._has_filter_type("behavioral")
 
+        if not (has_person_filters or has_behavioral_filters):
+            return False
+
         if has_person_filters and self.last_backfill_person_properties_at is None:
             return False
         if has_behavioral_filters and self.last_backfill_events_at is None:
             return False
 
-        # At least one backfill must have completed
-        return self.last_backfill_person_properties_at is not None or self.last_backfill_events_at is not None
+        return True
 
     @property
     def properties(self) -> PropertyGroup:

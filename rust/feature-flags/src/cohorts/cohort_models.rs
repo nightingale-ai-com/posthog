@@ -47,6 +47,12 @@ impl Cohort {
     /// Requires both a realtime/behavioral cohort type AND at least one populated
     /// backfill timestamp, which indicates that the membership table has been written to.
     /// Without any timestamp, the cohort falls through to dynamic filter evaluation.
+    ///
+    /// Note: Python's `Cohort.is_flag_compatible` gates on filter composition (person vs
+    /// behavioral) and requires the matching timestamp(s). Here we only need to know that
+    /// the membership table has been populated, so accepting either timestamp is sufficient.
+    /// The realtime cohort calculation workflow always writes both timestamps together, so
+    /// this OR never silently permits stale data.
     pub fn uses_realtime_membership(&self) -> bool {
         matches!(
             self.cohort_type,
