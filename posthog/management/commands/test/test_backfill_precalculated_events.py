@@ -1,22 +1,26 @@
 from io import StringIO
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from posthog.test.base import BaseTest
-from unittest.mock import patch
-
+from django.conf import settings
 from django.core.management import call_command
-from django.core.management.base import CommandError
-
+from django.core.management.base import CommandError, OutputWrapper
 from parameterized import parameterized
+from temporalio.common import WorkflowIDReusePolicy
 
 from posthog.management.commands.backfill_precalculated_events import (
     MAX_BACKFILL_DAYS,
+    Command,
     compute_backfill_days,
     extract_behavioral_filters,
 )
-from posthog.models import Cohort
+from posthog.models import Cohort, Team
 from posthog.models.cohort.cohort import CohortType
+from posthog.temporal.messaging.backfill_precalculated_events_coordinator_workflow import (
+    BackfillPrecalculatedEventsCoordinatorInputs,
+)
 from posthog.temporal.messaging.types import BehavioralEventFilter
+from posthog.test.base import BaseTest
 
 
 class TestExtractBehavioralFilters(BaseTest):
@@ -384,7 +388,9 @@ class TestComputeBackfillDays(BaseTest):
             ("unknown_interval_uses_1x", [(10, "unknown")], 10, 10),
         ]
     )
-    def test_compute_backfill_days(self, _name, filter_inputs, expected_clamped, expected_unclamped):
+    def test_compute_backfill_days(
+        self, _name, filter_inputs, expected_clamped, expected_unclamped
+    ):
         filters = [self._make_filter(tv, ti) for tv, ti in filter_inputs]
         clamped, unclamped = compute_backfill_days(filters)
         assert clamped == expected_clamped
@@ -453,7 +459,12 @@ class TestBackfillPrecalculatedEventsCommand(BaseTest):
             "posthog.management.commands.backfill_precalculated_events.Command.run_temporal_workflow"
         ) as mock_workflow:
             mock_workflow.return_value = "test-workflow-id"
-            call_command("backfill_precalculated_events", "--team-id", str(self.team.id), stdout=self.command_output)
+            call_command(
+                "backfill_precalculated_events",
+                "--team-id",
+                str(self.team.id),
+                stdout=self.command_output,
+            )
 
         self.assertTrue(mock_workflow.called)
         call_args = mock_workflow.call_args[1]
@@ -514,7 +525,12 @@ class TestBackfillPrecalculatedEventsCommand(BaseTest):
             "posthog.management.commands.backfill_precalculated_events.Command.run_temporal_workflow"
         ) as mock_workflow:
             mock_workflow.return_value = "test-workflow-id"
-            call_command("backfill_precalculated_events", "--team-id", str(self.team.id), stdout=self.command_output)
+            call_command(
+                "backfill_precalculated_events",
+                "--team-id",
+                str(self.team.id),
+                stdout=self.command_output,
+            )
 
         call_args = mock_workflow.call_args[1]
         cohort_ids = call_args["cohort_ids"]
@@ -618,13 +634,23 @@ class TestBackfillPrecalculatedEventsCommand(BaseTest):
             "posthog.management.commands.backfill_precalculated_events.Command.run_temporal_workflow"
         ) as mock_workflow:
             mock_workflow.return_value = "test-workflow-id"
-            call_command("backfill_precalculated_events", "--team-id", str(self.team.id), stdout=self.command_output)
+            call_command(
+                "backfill_precalculated_events",
+                "--team-id",
+                str(self.team.id),
+                stdout=self.command_output,
+            )
 
         call_args = mock_workflow.call_args[1]
         self.assertEqual(call_args["effective_days"], 60)
 
     def test_no_realtime_cohorts_shows_warning(self):
-        call_command("backfill_precalculated_events", "--team-id", str(self.team.id), stdout=self.command_output)
+        call_command(
+            "backfill_precalculated_events",
+            "--team-id",
+            str(self.team.id),
+            stdout=self.command_output,
+        )
 
         output = self.command_output.getvalue()
         self.assertIn("No realtime cohorts found", output)
@@ -650,4 +676,263 @@ class TestBackfillPrecalculatedEventsCommand(BaseTest):
                 "--days",
                 "-1",
                 stdout=self.command_output,
+            )
+
+    def test_team_ids_processes_multiple_teams(self):
+        team2 = Team.objects.create(organization=self.organization, name="Team 2")
+
+        Cohort.objects.create(
+            team=self.team,
+            name="Cohort Team 1",
+            cohort_type=CohortType.REALTIME,
+            filters={
+                "properties": {
+                    "type": "AND",
+                    "values": [
+                        {
+                            "type": "behavioral",
+                            "key": "$pageview",
+                            "value": "performed_event",
+                            "event_type": "events",
+                            "time_value": "30",
+                            "time_interval": "day",
+                            "conditionHash": "hash_t1",
+                            "bytecode": ["_H", 1, "op1"],
+                        }
+                    ],
+                }
+            },
+        )
+
+        Cohort.objects.create(
+            team=team2,
+            name="Cohort Team 2",
+            cohort_type=CohortType.REALTIME,
+            filters={
+                "properties": {
+                    "type": "AND",
+                    "values": [
+                        {
+                            "type": "behavioral",
+                            "key": "purchase",
+                            "value": "performed_event",
+                            "event_type": "events",
+                            "time_value": "14",
+                            "time_interval": "day",
+                            "conditionHash": "hash_t2",
+                            "bytecode": ["_H", 1, "op2"],
+                        }
+                    ],
+                }
+            },
+        )
+
+        with patch(
+            "posthog.management.commands.backfill_precalculated_events.Command.run_temporal_workflow"
+        ) as mock_workflow:
+            mock_workflow.return_value = "test-workflow-id"
+            call_command(
+                "backfill_precalculated_events",
+                "--team-ids",
+                str(self.team.id),
+                str(team2.id),
+                stdout=self.command_output,
+            )
+
+        self.assertEqual(mock_workflow.call_count, 2)
+        team_ids_called = sorted(
+            call[1]["team_id"] for call in mock_workflow.call_args_list
+        )
+        self.assertEqual(team_ids_called, sorted([self.team.id, team2.id]))
+
+    def test_cohort_id_restricts_to_specific_cohort(self):
+        target_cohort = Cohort.objects.create(
+            team=self.team,
+            name="Target Cohort",
+            cohort_type=CohortType.REALTIME,
+            filters={
+                "properties": {
+                    "type": "AND",
+                    "values": [
+                        {
+                            "type": "behavioral",
+                            "key": "$pageview",
+                            "value": "performed_event",
+                            "event_type": "events",
+                            "time_value": "30",
+                            "time_interval": "day",
+                            "conditionHash": "target_hash",
+                            "bytecode": ["_H", 1, "op1"],
+                        }
+                    ],
+                }
+            },
+        )
+
+        Cohort.objects.create(
+            team=self.team,
+            name="Other Cohort",
+            cohort_type=CohortType.REALTIME,
+            filters={
+                "properties": {
+                    "type": "AND",
+                    "values": [
+                        {
+                            "type": "behavioral",
+                            "key": "purchase",
+                            "value": "performed_event",
+                            "event_type": "events",
+                            "time_value": "7",
+                            "time_interval": "day",
+                            "conditionHash": "other_hash",
+                            "bytecode": ["_H", 1, "op2"],
+                        }
+                    ],
+                }
+            },
+        )
+
+        with patch(
+            "posthog.management.commands.backfill_precalculated_events.Command.run_temporal_workflow"
+        ) as mock_workflow:
+            mock_workflow.return_value = "test-workflow-id"
+            call_command(
+                "backfill_precalculated_events",
+                "--team-id",
+                str(self.team.id),
+                "--cohort-id",
+                str(target_cohort.id),
+                stdout=self.command_output,
+            )
+
+        self.assertTrue(mock_workflow.called)
+        call_args = mock_workflow.call_args[1]
+        filters = call_args["filters"]
+        cohort_ids = call_args["cohort_ids"]
+
+        self.assertEqual(len(filters), 1)
+        self.assertEqual(filters[0].condition_hash, "target_hash")
+        self.assertEqual(cohort_ids, [target_cohort.id])
+
+
+class TestRunTemporalWorkflow(BaseTest):
+    def setUp(self):
+        super().setUp()
+        self.command = Command()
+        self.command.stdout = OutputWrapper(StringIO())
+        self.filters = [
+            BehavioralEventFilter(
+                condition_hash="hash_1",
+                event_name="$pageview",
+                bytecode=["_H", 1, "op"],
+                time_value=30,
+                time_interval="day",
+                cohort_ids=[1, 2],
+            ),
+            BehavioralEventFilter(
+                condition_hash="hash_2",
+                event_name="$autocapture",
+                bytecode=["_H", 1, "op"],
+                time_value=7,
+                time_interval="day",
+                cohort_ids=[2],
+            ),
+        ]
+
+    def test_starts_workflow_with_expected_inputs_and_task_queue(self):
+        mock_client = MagicMock()
+        mock_client.start_workflow = AsyncMock()
+
+        with (
+            patch(
+                "posthog.management.commands.backfill_precalculated_events.async_connect",
+                new=AsyncMock(return_value=mock_client),
+            ),
+            patch(
+                "posthog.management.commands.backfill_precalculated_events.store_event_filters",
+                return_value="redis-key",
+            ) as mock_store,
+        ):
+            workflow_id = self.command.run_temporal_workflow(
+                team_id=self.team.id,
+                filters=self.filters,
+                cohort_ids=[1, 2],
+                effective_days=14,
+                concurrent_workflows=5,
+                force_reprocess=False,
+            )
+
+        mock_store.assert_called_once_with(self.filters, self.team.id)
+        mock_client.start_workflow.assert_awaited_once()
+        args, kwargs = mock_client.start_workflow.call_args
+        self.assertEqual(args[0], "backfill-precalculated-events-coordinator")
+        inputs = args[1]
+        self.assertIsInstance(inputs, BackfillPrecalculatedEventsCoordinatorInputs)
+        self.assertEqual(inputs.team_id, self.team.id)
+        self.assertEqual(inputs.filter_storage_key, "redis-key")
+        self.assertEqual(inputs.cohort_ids, [1, 2])
+        self.assertEqual(inputs.condition_hashes, ["hash_1", "hash_2"])
+        self.assertEqual(inputs.days_to_backfill, 14)
+        self.assertEqual(inputs.concurrent_workflows, 5)
+        self.assertFalse(inputs.force_reprocess)
+        self.assertEqual(kwargs["task_queue"], settings.MESSAGING_TASK_QUEUE)
+        self.assertEqual(
+            kwargs["id_reuse_policy"], WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
+        )
+        self.assertEqual(kwargs["id"], workflow_id)
+        self.assertTrue(
+            workflow_id.startswith(
+                f"backfill-precalculated-events-team-{self.team.id}-"
+            )
+        )
+
+    def test_workflow_id_is_unique_across_rapid_invocations(self):
+        mock_client = MagicMock()
+        mock_client.start_workflow = AsyncMock()
+
+        ids: list[str] = []
+        with (
+            patch(
+                "posthog.management.commands.backfill_precalculated_events.async_connect",
+                new=AsyncMock(return_value=mock_client),
+            ),
+            patch(
+                "posthog.management.commands.backfill_precalculated_events.store_event_filters",
+                return_value="redis-key",
+            ),
+        ):
+            for _ in range(5):
+                ids.append(
+                    self.command.run_temporal_workflow(
+                        team_id=self.team.id,
+                        filters=self.filters,
+                        cohort_ids=[1, 2],
+                        effective_days=14,
+                        concurrent_workflows=5,
+                    )
+                )
+
+        self.assertEqual(len(set(ids)), len(ids))
+
+    def test_raises_when_start_workflow_fails(self):
+        mock_client = MagicMock()
+        mock_client.start_workflow = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch(
+                "posthog.management.commands.backfill_precalculated_events.async_connect",
+                new=AsyncMock(return_value=mock_client),
+            ),
+            patch(
+                "posthog.management.commands.backfill_precalculated_events.store_event_filters",
+                return_value="redis-key",
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            self.command.run_temporal_workflow(
+                team_id=self.team.id,
+                filters=self.filters,
+                cohort_ids=[1, 2],
+                effective_days=14,
+                concurrent_workflows=5,
             )

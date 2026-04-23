@@ -1,18 +1,19 @@
 import asyncio
-import datetime as dt
 import dataclasses
+import datetime as dt
 from typing import Any
 
-from django.conf import settings
-
-import temporalio.common
 import temporalio.activity
-import temporalio.workflow
+import temporalio.common
 import temporalio.exceptions
+import temporalio.workflow
+from django.conf import settings
 
 from posthog.temporal.common.base import PostHogWorkflow
 from posthog.temporal.common.clickhouse import get_client
-from posthog.temporal.messaging.backfill_precalculated_events_workflow import BackfillPrecalculatedEventsInputs
+from posthog.temporal.messaging.backfill_precalculated_events_workflow import (
+    BackfillPrecalculatedEventsInputs,
+)
 
 
 @dataclasses.dataclass
@@ -33,7 +34,9 @@ class EventDateCheckResult:
 
 
 @temporalio.activity.defn
-async def check_day_already_backfilled_activity(inputs: EventDateCheckInputs) -> EventDateCheckResult:
+async def check_day_already_backfilled_activity(
+    inputs: EventDateCheckInputs,
+) -> EventDateCheckResult:
     """Check whether all conditions for a given day already have data in precalculated_events.
 
     This is a cheap COUNT query that catches the common re-run case without per-event lookups.
@@ -80,6 +83,7 @@ class BackfillPrecalculatedEventsCoordinatorInputs:
     condition_hashes: list[str]
     days_to_backfill: int
     concurrent_workflows: int = 5
+    force_reprocess: bool = False
 
     @property
     def properties_to_log(self) -> dict[str, Any]:
@@ -91,6 +95,7 @@ class BackfillPrecalculatedEventsCoordinatorInputs:
             "days_to_backfill": self.days_to_backfill,
             "concurrent_workflows": self.concurrent_workflows,
             "condition_count": len(self.condition_hashes),
+            "force_reprocess": self.force_reprocess,
         }
 
 
@@ -104,7 +109,9 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
 
     @staticmethod
     def parse_inputs(inputs: list[str]) -> BackfillPrecalculatedEventsCoordinatorInputs:
-        raise NotImplementedError("Use start_workflow() to trigger this workflow programmatically")
+        raise NotImplementedError(
+            "Use start_workflow() to trigger this workflow programmatically"
+        )
 
     async def _start_child_workflow_for_day(
         self,
@@ -120,8 +127,10 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
             team_id=inputs.team_id,
             filter_storage_key=inputs.filter_storage_key,
             cohort_ids=inputs.cohort_ids,
-            start_time=day_start.isoformat(),
-            end_time=day_end.isoformat(),
+            # ClickHouse's DateTime64 parser rejects ISO 8601 timezone suffixes (e.g. "+00:00"),
+            # so format the bounds in its native "YYYY-MM-DD HH:MM:SS" shape before sending to the query.
+            start_time=day_start.strftime("%Y-%m-%d %H:%M:%S"),
+            end_time=day_end.strftime("%Y-%m-%d %H:%M:%S"),
         )
 
         child_handle = await temporalio.workflow.start_child_workflow(
@@ -159,9 +168,13 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
     @temporalio.workflow.run
     async def run(self, inputs: BackfillPrecalculatedEventsCoordinatorInputs) -> None:
         if inputs.days_to_backfill <= 0:
-            raise ValueError(f"days_to_backfill must be positive, got {inputs.days_to_backfill}")
+            raise ValueError(
+                f"days_to_backfill must be positive, got {inputs.days_to_backfill}"
+            )
         if inputs.concurrent_workflows <= 0:
-            raise ValueError(f"concurrent_workflows must be positive, got {inputs.concurrent_workflows}")
+            raise ValueError(
+                f"concurrent_workflows must be positive, got {inputs.concurrent_workflows}"
+            )
 
         workflow_logger = temporalio.workflow.logger
         workflow_logger.info(
@@ -174,8 +187,10 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
         now = temporalio.workflow.now()
         day_ranges: list[tuple[dt.datetime, dt.datetime]] = []
         for day_offset in range(inputs.days_to_backfill):
-            day_end = (now - dt.timedelta(days=day_offset)).replace(hour=0, minute=0, second=0, microsecond=0)
-            day_start = day_end - dt.timedelta(days=1)
+            day_start = (now - dt.timedelta(days=day_offset)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            day_end = day_start + dt.timedelta(days=1)
             # For today's partial day, use now as the end
             if day_offset == 0:
                 day_end = now
@@ -195,27 +210,32 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
         for day_start, day_end in day_ranges:
             date_str = day_start.strftime("%Y-%m-%d")
 
-            # Check if this day is already backfilled
-            check_result = await temporalio.workflow.execute_activity(
-                check_day_already_backfilled_activity,
-                EventDateCheckInputs(
-                    team_id=inputs.team_id,
-                    condition_hashes=inputs.condition_hashes,
-                    date=date_str,
-                ),
-                start_to_close_timeout=dt.timedelta(minutes=2),
-                retry_policy=temporalio.common.RetryPolicy(maximum_attempts=3),
-            )
+            # Check if this day is already backfilled (skippable unless force_reprocess is set)
+            if not inputs.force_reprocess:
+                check_result = await temporalio.workflow.execute_activity(
+                    check_day_already_backfilled_activity,
+                    EventDateCheckInputs(
+                        team_id=inputs.team_id,
+                        condition_hashes=inputs.condition_hashes,
+                        date=date_str,
+                    ),
+                    start_to_close_timeout=dt.timedelta(minutes=2),
+                    retry_policy=temporalio.common.RetryPolicy(maximum_attempts=3),
+                )
 
-            if check_result.already_backfilled:
-                workflow_logger.info(f"Skipping {date_str}: already backfilled")
-                days_skipped += 1
-                continue
+                if check_result.already_backfilled:
+                    workflow_logger.info(f"Skipping {date_str}: already backfilled")
+                    days_skipped += 1
+                    continue
 
             # Respect concurrency limit
             if len(child_workflow_handles) >= inputs.concurrent_workflows:
-                done, _ = await asyncio.wait(child_workflow_handles, return_when=asyncio.FIRST_COMPLETED)
-                c, f = await self._drain_completed(done, child_workflow_handles, workflow_logger)
+                done, _ = await asyncio.wait(
+                    child_workflow_handles, return_when=asyncio.FIRST_COMPLETED
+                )
+                c, f = await self._drain_completed(
+                    done, child_workflow_handles, workflow_logger
+                )
                 completed_count += c
                 failed_count += f
 
@@ -231,8 +251,12 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
             f"skipped {days_skipped} already-backfilled days"
         )
         while child_workflow_handles:
-            done, _ = await asyncio.wait(child_workflow_handles, return_when=asyncio.FIRST_COMPLETED)
-            c, f = await self._drain_completed(done, child_workflow_handles, workflow_logger)
+            done, _ = await asyncio.wait(
+                child_workflow_handles, return_when=asyncio.FIRST_COMPLETED
+            )
+            c, f = await self._drain_completed(
+                done, child_workflow_handles, workflow_logger
+            )
             completed_count += c
             failed_count += f
 

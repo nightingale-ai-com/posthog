@@ -24,12 +24,19 @@ class BackfillPrecalculatedEventsForm(forms.Form):
         label="Days to backfill",
     )
     concurrent_workflows = forms.IntegerField(
+        required=False,
         initial=5,
         min_value=1,
         max_value=100,
         help_text="Number of concurrent child workflows to run (1-100, default: 5)",
         label="Concurrent workflows",
     )
+
+    def clean_concurrent_workflows(self):
+        value = self.cleaned_data.get("concurrent_workflows")
+        if value is None:
+            return 5
+        return value
 
 
 def backfill_precalculated_events_view(request):
@@ -44,12 +51,19 @@ def backfill_precalculated_events_view(request):
             command_args.extend(["--team-id", str(form.cleaned_data["team_id"])])
 
             if form.cleaned_data.get("cohort_id"):
-                command_args.extend(["--cohort-id", str(form.cleaned_data["cohort_id"])])
+                command_args.extend(
+                    ["--cohort-id", str(form.cleaned_data["cohort_id"])]
+                )
 
             if form.cleaned_data.get("days"):
                 command_args.extend(["--days", str(form.cleaned_data["days"])])
 
-            command_args.extend(["--concurrent-workflows", str(form.cleaned_data["concurrent_workflows"])])
+            command_args.extend(
+                [
+                    "--concurrent-workflows",
+                    str(form.cleaned_data["concurrent_workflows"]),
+                ]
+            )
 
             try:
                 call_command("backfill_precalculated_events", *command_args)

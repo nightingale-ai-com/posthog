@@ -1,12 +1,13 @@
-import time
 import asyncio
+import dataclasses
 import datetime as dt
+import time
+import uuid
 from typing import Any
 
+import structlog
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-
-import structlog
 from temporalio.common import WorkflowIDReusePolicy
 
 from posthog.models import Cohort
@@ -20,6 +21,19 @@ from posthog.temporal.messaging.filter_storage import store_event_filters
 from posthog.temporal.messaging.types import BehavioralEventFilter
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclasses.dataclass
+class _DeduplicatedCondition:
+    """Accumulator for deduplicating behavioral filters across cohorts."""
+
+    bytecode: list[Any]
+    event_name: str
+    time_value: int
+    time_interval: str
+    event_filters: list[dict] | None
+    cohort_ids: set[int]
+
 
 # Behavioral filter types that can be compiled to bytecode for realtime evaluation
 SUPPORTED_BEHAVIORAL_TYPES = {
@@ -78,6 +92,15 @@ def extract_behavioral_filters(cohort: Cohort) -> list[BehavioralEventFilter]:
         event_name = node.get("key")
 
         if not condition_hash or not bytecode or not event_name:
+            return
+
+        # Bytecode must be a list with header + version + at least one op
+        if not isinstance(bytecode, list) or len(bytecode) <= 2:
+            logger.warning(
+                "Skipping behavioral filter with invalid bytecode",
+                condition_hash=condition_hash,
+                bytecode_type=type(bytecode).__name__,
+            )
             return
 
         # event_name must be a string (action IDs are ints and not supported for backfill)
@@ -175,6 +198,12 @@ class Command(BaseCommand):
             default=5,
             help="Number of concurrent child workflows to run (default: 5)",
         )
+        parser.add_argument(
+            "--force-reprocess",
+            action="store_true",
+            default=False,
+            help="Skip the already-backfilled check and reprocess all days unconditionally",
+        )
 
     def handle(self, *args, **options):
         team_id = options.get("team_id")
@@ -182,15 +211,20 @@ class Command(BaseCommand):
         cohort_id = options.get("cohort_id")
         days_override = options.get("days")
         concurrent_workflows = options["concurrent_workflows"]
+        force_reprocess = options["force_reprocess"]
 
         if team_id and team_ids_option:
-            raise CommandError("Cannot use both --team-id and --team-ids. Please use only one.")
+            raise CommandError(
+                "Cannot use both --team-id and --team-ids. Please use only one."
+            )
 
         if not team_id and not team_ids_option:
             raise CommandError("Must provide either --team-id or --team-ids")
 
         if cohort_id and team_ids_option:
-            raise CommandError("Cannot use --cohort-id with --team-ids. Use --cohort-id only with --team-id.")
+            raise CommandError(
+                "Cannot use --cohort-id with --team-ids. Use --cohort-id only with --team-id."
+            )
 
         if days_override is not None and days_override <= 0:
             raise CommandError("--days must be a positive integer")
@@ -200,16 +234,24 @@ class Command(BaseCommand):
         else:
             team_ids = sorted(set(team_ids_option or []))
 
-        self.stdout.write(self.style.SUCCESS(f"Processing {len(team_ids)} team(s): {team_ids}"))
+        self.stdout.write(
+            self.style.SUCCESS(f"Processing {len(team_ids)} team(s): {team_ids}")
+        )
 
         for current_team_id in team_ids:
-            self.stdout.write(self.style.SUCCESS(f"\n=== Processing Team {current_team_id} ==="))
+            self.stdout.write(
+                self.style.SUCCESS(f"\n=== Processing Team {current_team_id} ===")
+            )
 
             if cohort_id:
                 try:
-                    cohorts = [Cohort.objects.get(id=cohort_id, team_id=current_team_id)]
+                    cohorts = [
+                        Cohort.objects.get(id=cohort_id, team_id=current_team_id)
+                    ]
                 except Cohort.DoesNotExist:
-                    raise CommandError(f"Cohort {cohort_id} not found for team {current_team_id}")
+                    raise CommandError(
+                        f"Cohort {cohort_id} not found for team {current_team_id}"
+                    )
             else:
                 cohorts = list(
                     Cohort.objects.filter(
@@ -219,16 +261,21 @@ class Command(BaseCommand):
                     ).order_by("id")
                 )
                 if not cohorts:
-                    self.stdout.write(self.style.WARNING(f"No realtime cohorts found for team {current_team_id}"))
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"No realtime cohorts found for team {current_team_id}"
+                        )
+                    )
                     continue
 
             self.stdout.write(
-                self.style.SUCCESS(f"Found {len(cohorts)} cohort(s) to evaluate for team {current_team_id}")
+                self.style.SUCCESS(
+                    f"Found {len(cohorts)} cohort(s) to evaluate for team {current_team_id}"
+                )
             )
 
             # Collect and deduplicate filters across all cohorts
-            # Maps condition_hash -> (bytecode, event_name, time_value, time_interval, event_filters, cohort_ids)
-            condition_map: dict[str, tuple[list[Any], str, int, str, list[dict] | None, set[int]]] = {}
+            condition_map: dict[str, _DeduplicatedCondition] = {}
             cohort_ids: list[int] = []
             total_original_filters = 0
 
@@ -252,47 +299,50 @@ class Command(BaseCommand):
 
                 cohort_ids.append(cohort.id)
                 total_original_filters += len(filters)
-                self.stdout.write(self.style.SUCCESS(f"Cohort {cohort.id}: found {len(filters)} behavioral filters"))
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"Cohort {cohort.id}: found {len(filters)} behavioral filters"
+                    )
+                )
 
                 for f in filters:
                     if f.condition_hash not in condition_map:
-                        condition_map[f.condition_hash] = (
-                            f.bytecode,
-                            f.event_name,
-                            f.time_value,
-                            f.time_interval,
-                            f.event_filters,
-                            {cohort.id},
+                        condition_map[f.condition_hash] = _DeduplicatedCondition(
+                            bytecode=f.bytecode,
+                            event_name=f.event_name,
+                            time_value=f.time_value,
+                            time_interval=f.time_interval,
+                            event_filters=f.event_filters,
+                            cohort_ids={cohort.id},
                         )
-                        self.stdout.write(f"  + New condition: {f.condition_hash} (event: {f.event_name})")
+                        self.stdout.write(
+                            f"  + New condition: {f.condition_hash} (event: {f.event_name})"
+                        )
                     else:
-                        condition_map[f.condition_hash][5].add(cohort.id)
-                        self.stdout.write(f"  = Duplicate condition: {f.condition_hash}")
+                        condition_map[f.condition_hash].cohort_ids.add(cohort.id)
+                        self.stdout.write(
+                            f"  = Duplicate condition: {f.condition_hash}"
+                        )
 
             if not condition_map:
                 self.stdout.write(
-                    self.style.WARNING(f"No behavioral filters found across any cohorts for team {current_team_id}")
+                    self.style.WARNING(
+                        f"No behavioral filters found across any cohorts for team {current_team_id}"
+                    )
                 )
                 continue
 
             deduplicated_filters = [
                 BehavioralEventFilter(
                     condition_hash=condition_hash,
-                    bytecode=bytecode,
-                    cohort_ids=sorted(cohort_set),
-                    event_name=event_name,
-                    time_value=time_value,
-                    time_interval=time_interval,
-                    event_filters=event_filters,
+                    bytecode=cond.bytecode,
+                    cohort_ids=sorted(cond.cohort_ids),
+                    event_name=cond.event_name,
+                    time_value=cond.time_value,
+                    time_interval=cond.time_interval,
+                    event_filters=cond.event_filters,
                 )
-                for condition_hash, (
-                    bytecode,
-                    event_name,
-                    time_value,
-                    time_interval,
-                    event_filters,
-                    cohort_set,
-                ) in sorted(condition_map.items())
+                for condition_hash, cond in sorted(condition_map.items())
             ]
 
             cohort_ids = sorted(cohort_ids)
@@ -307,7 +357,9 @@ class Command(BaseCommand):
                         )
                     )
             else:
-                effective_days, auto_computed_unclamped = compute_backfill_days(deduplicated_filters)
+                effective_days, auto_computed_unclamped = compute_backfill_days(
+                    deduplicated_filters
+                )
                 if auto_computed_unclamped > MAX_BACKFILL_DAYS:
                     self.stdout.write(
                         self.style.WARNING(
@@ -348,9 +400,14 @@ class Command(BaseCommand):
                     cohort_ids=cohort_ids,
                     effective_days=effective_days,
                     concurrent_workflows=concurrent_workflows,
+                    force_reprocess=force_reprocess,
                 )
             except Exception as e:
-                self.stdout.write(self.style.ERROR(f"Failed to start workflow for team {current_team_id}: {e}"))
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"Failed to start workflow for team {current_team_id}: {e}"
+                    )
+                )
                 continue
 
             self.stdout.write(
@@ -371,18 +428,21 @@ class Command(BaseCommand):
         cohort_ids: list[int],
         effective_days: int,
         concurrent_workflows: int,
+        force_reprocess: bool = False,
     ) -> str:
         """Run the Temporal coordinator workflow for the team."""
+        filter_storage_key = store_event_filters(filters, team_id)
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Stored {len(filters)} event filters in Redis with key: {filter_storage_key}"
+            )
+        )
+
+        condition_hashes = sorted({f.condition_hash for f in filters})
+        workflow_id = f"backfill-precalculated-events-team-{team_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
 
         async def _run_workflow():
             client = await async_connect()
-
-            filter_storage_key = store_event_filters(filters, team_id)
-            self.stdout.write(
-                self.style.SUCCESS(f"Stored {len(filters)} event filters in Redis with key: {filter_storage_key}")
-            )
-
-            condition_hashes = sorted({f.condition_hash for f in filters})
 
             inputs = BackfillPrecalculatedEventsCoordinatorInputs(
                 team_id=team_id,
@@ -391,9 +451,8 @@ class Command(BaseCommand):
                 condition_hashes=condition_hashes,
                 days_to_backfill=effective_days,
                 concurrent_workflows=concurrent_workflows,
+                force_reprocess=force_reprocess,
             )
-
-            workflow_id = f"backfill-precalculated-events-team-{team_id}-{int(time.time())}"
 
             await client.start_workflow(
                 "backfill-precalculated-events-coordinator",
@@ -407,6 +466,6 @@ class Command(BaseCommand):
 
         try:
             return asyncio.run(_run_workflow())
-        except Exception as e:
-            logger.exception(f"Failed to execute Temporal workflow: {e}")
+        except Exception:
+            logger.exception("Failed to execute Temporal workflow")
             raise

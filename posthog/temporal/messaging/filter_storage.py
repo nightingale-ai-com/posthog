@@ -8,26 +8,25 @@ TTL Considerations:
 - Individual activities have start_to_close_timeout=12h with maximum_attempts=3
 - Coordinator workflows spawn multiple child workflows with batch delays
 - Total workflow execution time in worst case: 3 retries × 12h + batch delays ≈ 40-48h
-- TTL set to 72h (3 days) provides safety margin for retries and delays
-- If workflows consistently exceed 48h, consider TTL refresh logic in get_filters()
+- TTL set to 168h (7 days) provides generous safety margin for retries and delays
+- If workflows consistently approach TTL (7d), consider TTL refresh logic in get_filters()
 """
 
-import json
 import hashlib
+import json
 from typing import Any
 
 import structlog
 
+from common.hogvm.python.operation import HOGQL_BYTECODE_IDENTIFIER, Operation
 from posthog.redis import get_client
 from posthog.temporal.messaging.types import BehavioralEventFilter, PersonPropertyFilter
-
-from common.hogvm.python.operation import HOGQL_BYTECODE_IDENTIFIER, Operation
 
 KEY_PREFIX = "backfill_person_properties_filters:"
 EVENT_KEY_PREFIX = "backfill_event_filters:"
 # TTL sizing: Worst case workflow duration ~48h (3 × 12h retries + batch delays)
-# 72h provides 50% safety margin. Increase if workflows consistently run longer.
-DEFAULT_TTL = 72 * 60 * 60  # 3 days
+# 168h provides generous safety margin for complex backfill operations that may run longer.
+DEFAULT_TTL = 168 * 60 * 60  # 7 days
 
 logger = structlog.get_logger(__name__)
 
@@ -63,7 +62,9 @@ def combine_filter_bytecodes(filters: list[PersonPropertyFilter]) -> list[Any]:
     return combined
 
 
-def store_filters(filters: list[PersonPropertyFilter], team_id: int, ttl: int = DEFAULT_TTL) -> str:
+def store_filters(
+    filters: list[PersonPropertyFilter], team_id: int, ttl: int = DEFAULT_TTL
+) -> str:
     """
     Store a list of filters and return a storage key.
 
@@ -103,7 +104,9 @@ def store_filters(filters: list[PersonPropertyFilter], team_id: int, ttl: int = 
     }
 
     # Create hash of the storage data for the key
-    content_hash = hashlib.sha256(json.dumps(storage_data, sort_keys=True).encode()).hexdigest()
+    content_hash = hashlib.sha256(
+        json.dumps(storage_data, sort_keys=True).encode()
+    ).hexdigest()
 
     storage_key = f"{KEY_PREFIX}team_{team_id}_{content_hash}"
 
@@ -113,7 +116,9 @@ def store_filters(filters: list[PersonPropertyFilter], team_id: int, ttl: int = 
     return storage_key
 
 
-def get_filters_and_properties(storage_key: str) -> tuple[list[PersonPropertyFilter], list[str], list[Any]] | None:
+def get_filters_and_properties(
+    storage_key: str,
+) -> tuple[list[PersonPropertyFilter], list[str], list[Any]] | None:
     """
     Retrieve filters, person properties, and combined bytecode using a storage key.
 
@@ -124,7 +129,7 @@ def get_filters_and_properties(storage_key: str) -> tuple[list[PersonPropertyFil
         Tuple of (filters, person_properties, combined_bytecode), or None if not found
 
     Note:
-        If workflows consistently exceed 48h and TTL becomes an issue,
+        If workflows consistently approach TTL (7d) and expiration becomes an issue,
         consider adding TTL refresh logic here using Redis EXPIRE command.
     """
     data = get_client().get(storage_key)
@@ -160,6 +165,9 @@ def combine_event_filter_bytecodes(filters: list[BehavioralEventFilter]) -> list
     Same strategy as combine_filter_bytecodes: strips headers, interleaves condition_hash keys,
     and appends a DICT opcode. The resulting bytecode returns {condition_hash: bool_result, ...}
     when executed with event globals.
+
+    Malformed filters (bytecode length <= 2) are silently skipped with a warning log. If all
+    filters are malformed, the result is a valid bytecode that produces an empty dict.
     """
     combined: list[Any] = [HOGQL_BYTECODE_IDENTIFIER, 1]
 
@@ -184,7 +192,9 @@ def combine_event_filter_bytecodes(filters: list[BehavioralEventFilter]) -> list
     return combined
 
 
-def store_event_filters(filters: list[BehavioralEventFilter], team_id: int, ttl: int = DEFAULT_TTL) -> str:
+def store_event_filters(
+    filters: list[BehavioralEventFilter], team_id: int, ttl: int = DEFAULT_TTL
+) -> str:
     """Store behavioral event filters in Redis and return a storage key.
 
     Filters are grouped by event name and a combined bytecode is built per group,
@@ -209,7 +219,8 @@ def store_event_filters(filters: list[BehavioralEventFilter], team_id: int, ttl:
         event_name_groups.setdefault(f.event_name, []).append(f)
 
     combined_bytecodes_by_event: dict[str, list[Any]] = {
-        event_name: combine_event_filter_bytecodes(group) for event_name, group in sorted(event_name_groups.items())
+        event_name: combine_event_filter_bytecodes(group)
+        for event_name, group in sorted(event_name_groups.items())
     }
 
     storage_data = {
@@ -218,7 +229,9 @@ def store_event_filters(filters: list[BehavioralEventFilter], team_id: int, ttl:
         "combined_bytecodes_by_event": combined_bytecodes_by_event,
     }
 
-    content_hash = hashlib.sha256(json.dumps(storage_data, sort_keys=True).encode()).hexdigest()
+    content_hash = hashlib.sha256(
+        json.dumps(storage_data, sort_keys=True).encode()
+    ).hexdigest()
     storage_key = f"{EVENT_KEY_PREFIX}team_{team_id}_{content_hash}"
 
     get_client().setex(storage_key, ttl, json.dumps(storage_data))
@@ -262,7 +275,8 @@ def get_event_filters(
         for f in filters:
             event_name_groups.setdefault(f.event_name, []).append(f)
         combined_bytecodes_by_event = {
-            event_name: combine_event_filter_bytecodes(group) for event_name, group in sorted(event_name_groups.items())
+            event_name: combine_event_filter_bytecodes(group)
+            for event_name, group in sorted(event_name_groups.items())
         }
 
     return filters, event_names, combined_bytecodes_by_event
