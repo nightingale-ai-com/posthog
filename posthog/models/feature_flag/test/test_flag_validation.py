@@ -38,19 +38,31 @@ class TestExcludeRealtimeBackfilledCohortProperties(APIBaseTest):
             # (name, cohort_kwargs, allow_realtime_backfilled, expect_cohort_filtered)
             (
                 "disabled_flag_keeps_all",
-                {"cohort_type": CohortType.REALTIME, "last_backfill_person_properties_at": datetime.now()},
+                {
+                    "cohort_type": CohortType.REALTIME,
+                    "last_backfill_person_properties_at": datetime.now(),
+                    "last_backfill_events_at": datetime.now(),
+                },
                 False,
                 False,
             ),
             (
                 "enabled_realtime_backfilled_filtered",
-                {"cohort_type": CohortType.REALTIME, "last_backfill_person_properties_at": datetime.now()},
+                {
+                    "cohort_type": CohortType.REALTIME,
+                    "last_backfill_person_properties_at": datetime.now(),
+                    "last_backfill_events_at": datetime.now(),
+                },
                 True,
                 True,
             ),
             (
                 "enabled_realtime_not_backfilled_kept",
-                {"cohort_type": CohortType.REALTIME, "last_backfill_person_properties_at": None},
+                {
+                    "cohort_type": CohortType.REALTIME,
+                    "last_backfill_person_properties_at": None,
+                    "last_backfill_events_at": None,
+                },
                 True,
                 False,
             ),

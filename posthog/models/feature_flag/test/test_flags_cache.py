@@ -792,6 +792,7 @@ class TestServiceFlagsDataFormat(BaseTest):
                 }
             },
             last_backfill_person_properties_at=datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC),
+            last_backfill_events_at=datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC),
         )
 
         # 1) full-flag: exercises all optional nested structures.
