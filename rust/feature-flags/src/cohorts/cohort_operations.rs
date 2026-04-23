@@ -20,7 +20,7 @@ const COHORT_COLUMNS: &str = r#"
     c.id, c.name, c.description, c.team_id, c.deleted, c.filters,
     c.query, c.version, c.pending_version, c.count, c.is_calculating,
     c.is_static, c.errors_calculating, c.groups, c.created_by_id,
-    c.cohort_type, c.last_backfill_person_properties_at
+    c.cohort_type, c.last_backfill_person_properties_at, c.last_backfill_events_at
 "#;
 
 impl Cohort {

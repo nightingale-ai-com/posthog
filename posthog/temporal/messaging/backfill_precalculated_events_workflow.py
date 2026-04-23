@@ -1,19 +1,18 @@
-import asyncio
-import dataclasses
-import datetime as dt
-import json
 import os
+import json
 import time
+import asyncio
+import datetime as dt
+import dataclasses
 from typing import Any
 
 import structlog
-import temporalio.activity
 import temporalio.common
-import temporalio.exceptions
+import temporalio.activity
 import temporalio.workflow
+import temporalio.exceptions
 from structlog.contextvars import bind_contextvars
 
-from common.hogvm.python.execute import BytecodeResult, execute_bytecode
 from posthog.clickhouse.query_tagging import Feature, Product, tags_context
 from posthog.kafka_client.client import _KafkaProducer
 from posthog.kafka_client.routing import get_producer
@@ -24,6 +23,8 @@ from posthog.temporal.common.heartbeat import Heartbeater
 from posthog.temporal.common.logger import get_logger
 from posthog.temporal.messaging.filter_storage import get_event_filters
 from posthog.temporal.messaging.types import BehavioralEventFilter
+
+from common.hogvm.python.execute import BytecodeResult, execute_bytecode
 
 LOGGER = get_logger(__name__)
 
@@ -41,9 +42,7 @@ def parse_event_properties(properties_raw: Any, event_uuid: str) -> dict[str, An
             parsed = json.loads(properties_raw)
             return parsed if isinstance(parsed, dict) else {}
         except json.JSONDecodeError:
-            LOGGER.warning(
-                "Failed to parse properties for event", event_uuid=event_uuid
-            )
+            LOGGER.warning("Failed to parse properties for event", event_uuid=event_uuid)
             return {}
     return properties_raw if isinstance(properties_raw, dict) else {}
 
@@ -80,9 +79,7 @@ def evaluate_event_combined_filters_sync(
 ) -> dict[str, Any]:
     """Execute combined bytecode for event filters, returning {condition_hash: result}."""
     try:
-        bytecode_result: BytecodeResult = execute_bytecode(
-            combined_bytecode, hog_globals
-        )
+        bytecode_result: BytecodeResult = execute_bytecode(combined_bytecode, hog_globals)
         result = bytecode_result.result
         if isinstance(result, dict):
             return result
@@ -105,9 +102,7 @@ def evaluate_event_individual_filters_sync(
     results = {}
     for filter_obj in filters:
         try:
-            bytecode_result: BytecodeResult = execute_bytecode(
-                filter_obj.bytecode, hog_globals
-            )
+            bytecode_result: BytecodeResult = execute_bytecode(filter_obj.bytecode, hog_globals)
             result = bytecode_result.result
             if isinstance(result, bool):
                 results[filter_obj.condition_hash] = result
@@ -129,15 +124,11 @@ def evaluate_event_filters_with_fallback_sync(
 ) -> dict[str, Any]:
     """Execute combined bytecode with fallback to individual filter execution."""
     try:
-        bytecode_result: BytecodeResult = execute_bytecode(
-            combined_bytecode, hog_globals
-        )
+        bytecode_result: BytecodeResult = execute_bytecode(combined_bytecode, hog_globals)
         result = bytecode_result.result
 
         if isinstance(result, dict):
-            invalid_entries = {
-                k: v for k, v in result.items() if not isinstance(v, bool)
-            }
+            invalid_entries = {k: v for k, v in result.items() if not isinstance(v, bool)}
             if not invalid_entries:
                 return result
             LOGGER.warning(
@@ -200,9 +191,7 @@ async def backfill_precalculated_events_activity(
     )
 
     # Load event filters from Redis
-    storage_result = await asyncio.to_thread(
-        get_event_filters, inputs.filter_storage_key
-    )
+    storage_result = await asyncio.to_thread(get_event_filters, inputs.filter_storage_key)
     if storage_result is None:
         raise temporalio.exceptions.ApplicationError(
             f"Event filters not found in storage for key: {inputs.filter_storage_key}. "
@@ -212,9 +201,7 @@ async def backfill_precalculated_events_activity(
         )
 
     filters, event_names, combined_bytecodes_by_event = storage_result
-    logger.info(
-        f"Loaded {len(filters)} event filters for {len(event_names)} event names from storage"
-    )
+    logger.info(f"Loaded {len(filters)} event filters for {len(event_names)} event names from storage")
 
     if not filters:
         logger.info("No event filters found, aborting backfill")
@@ -246,13 +233,9 @@ async def backfill_precalculated_events_activity(
         total_flushed = 0
         kafka_results: list = []
         try:
-            KAFKA_FLUSH_BATCH_SIZE = int(
-                os.environ.get("BACKFILL_EVENTS_KAFKA_FLUSH_BATCH_SIZE", "1000")
-            )
+            KAFKA_FLUSH_BATCH_SIZE = int(os.environ.get("BACKFILL_EVENTS_KAFKA_FLUSH_BATCH_SIZE", "1000"))
         except ValueError:
-            logger.warning(
-                "Invalid BACKFILL_EVENTS_KAFKA_FLUSH_BATCH_SIZE, using default 1000"
-            )
+            logger.warning("Invalid BACKFILL_EVENTS_KAFKA_FLUSH_BATCH_SIZE, using default 1000")
             KAFKA_FLUSH_BATCH_SIZE = 1000
 
         events_query = """
@@ -290,9 +273,7 @@ async def backfill_precalculated_events_activity(
             first_row = True
 
             async with get_client(team_id=inputs.team_id) as client:
-                async for row in client.stream_query_as_jsonl(
-                    events_query, query_parameters=query_params
-                ):
+                async for row in client.stream_query_as_jsonl(events_query, query_parameters=query_params):
                     if first_row:
                         time_to_first = time.monotonic() - query_start_time
                         logger.info(
@@ -307,9 +288,7 @@ async def backfill_precalculated_events_activity(
                     event_date = str(row["date"])
                     distinct_id = str(row["distinct_id"])
                     person_id = str(row["person_id"])
-                    event_properties = parse_event_properties(
-                        row["properties"], event_uuid
-                    )
+                    event_properties = parse_event_properties(row["properties"], event_uuid)
 
                     # Look up the combined bytecode for this event name
                     combined_bytecode = combined_bytecodes_by_event.get(event_name)
@@ -382,9 +361,7 @@ async def backfill_precalculated_events_activity(
         # Final flush
         if kafka_results:
             logger.info(f"Final flush of {len(kafka_results)} Kafka results")
-            final_flushed = await flush_kafka_batch_async(
-                kafka_results, kafka_producer, inputs.team_id, logger
-            )
+            final_flushed = await flush_kafka_batch_async(kafka_results, kafka_producer, inputs.team_id, logger)
             total_flushed += final_flushed
 
         duration_seconds = time.time() - start_time
@@ -409,14 +386,10 @@ class BackfillPrecalculatedEventsWorkflow(PostHogWorkflow):
 
     @staticmethod
     def parse_inputs(inputs: list[str]) -> BackfillPrecalculatedEventsInputs:
-        raise NotImplementedError(
-            "Use start_workflow() to trigger this workflow programmatically"
-        )
+        raise NotImplementedError("Use start_workflow() to trigger this workflow programmatically")
 
     @temporalio.workflow.run
-    async def run(
-        self, inputs: BackfillPrecalculatedEventsInputs
-    ) -> BackfillPrecalculatedEventsResult:
+    async def run(self, inputs: BackfillPrecalculatedEventsInputs) -> BackfillPrecalculatedEventsResult:
         workflow_logger = temporalio.workflow.logger
         workflow_logger.info(
             f"Starting event backfill for {len(inputs.cohort_ids)} cohorts "

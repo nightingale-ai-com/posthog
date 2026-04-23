@@ -12,15 +12,16 @@ TTL Considerations:
 - If workflows consistently approach TTL (7d), consider TTL refresh logic in get_filters()
 """
 
-import hashlib
 import json
+import hashlib
 from typing import Any
 
 import structlog
 
-from common.hogvm.python.operation import HOGQL_BYTECODE_IDENTIFIER, Operation
 from posthog.redis import get_client
 from posthog.temporal.messaging.types import BehavioralEventFilter, PersonPropertyFilter
+
+from common.hogvm.python.operation import HOGQL_BYTECODE_IDENTIFIER, Operation
 
 KEY_PREFIX = "backfill_person_properties_filters:"
 EVENT_KEY_PREFIX = "backfill_event_filters:"
@@ -62,9 +63,7 @@ def combine_filter_bytecodes(filters: list[PersonPropertyFilter]) -> list[Any]:
     return combined
 
 
-def store_filters(
-    filters: list[PersonPropertyFilter], team_id: int, ttl: int = DEFAULT_TTL
-) -> str:
+def store_filters(filters: list[PersonPropertyFilter], team_id: int, ttl: int = DEFAULT_TTL) -> str:
     """
     Store a list of filters and return a storage key.
 
@@ -104,9 +103,7 @@ def store_filters(
     }
 
     # Create hash of the storage data for the key
-    content_hash = hashlib.sha256(
-        json.dumps(storage_data, sort_keys=True).encode()
-    ).hexdigest()
+    content_hash = hashlib.sha256(json.dumps(storage_data, sort_keys=True).encode()).hexdigest()
 
     storage_key = f"{KEY_PREFIX}team_{team_id}_{content_hash}"
 
@@ -192,9 +189,7 @@ def combine_event_filter_bytecodes(filters: list[BehavioralEventFilter]) -> list
     return combined
 
 
-def store_event_filters(
-    filters: list[BehavioralEventFilter], team_id: int, ttl: int = DEFAULT_TTL
-) -> str:
+def store_event_filters(filters: list[BehavioralEventFilter], team_id: int, ttl: int = DEFAULT_TTL) -> str:
     """Store behavioral event filters in Redis and return a storage key.
 
     Filters are grouped by event name and a combined bytecode is built per group,
@@ -219,8 +214,7 @@ def store_event_filters(
         event_name_groups.setdefault(f.event_name, []).append(f)
 
     combined_bytecodes_by_event: dict[str, list[Any]] = {
-        event_name: combine_event_filter_bytecodes(group)
-        for event_name, group in sorted(event_name_groups.items())
+        event_name: combine_event_filter_bytecodes(group) for event_name, group in sorted(event_name_groups.items())
     }
 
     storage_data = {
@@ -229,9 +223,7 @@ def store_event_filters(
         "combined_bytecodes_by_event": combined_bytecodes_by_event,
     }
 
-    content_hash = hashlib.sha256(
-        json.dumps(storage_data, sort_keys=True).encode()
-    ).hexdigest()
+    content_hash = hashlib.sha256(json.dumps(storage_data, sort_keys=True).encode()).hexdigest()
     storage_key = f"{EVENT_KEY_PREFIX}team_{team_id}_{content_hash}"
 
     get_client().setex(storage_key, ttl, json.dumps(storage_data))
@@ -275,8 +267,7 @@ def get_event_filters(
         for f in filters:
             event_name_groups.setdefault(f.event_name, []).append(f)
         combined_bytecodes_by_event = {
-            event_name: combine_event_filter_bytecodes(group)
-            for event_name, group in sorted(event_name_groups.items())
+            event_name: combine_event_filter_bytecodes(group) for event_name, group in sorted(event_name_groups.items())
         }
 
     return filters, event_names, combined_bytecodes_by_event

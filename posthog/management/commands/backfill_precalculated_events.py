@@ -1,13 +1,14 @@
-import asyncio
-import dataclasses
-import datetime as dt
 import time
 import uuid
+import asyncio
+import datetime as dt
+import dataclasses
 from typing import Any
 
-import structlog
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+
+import structlog
 from temporalio.common import WorkflowIDReusePolicy
 
 from posthog.models import Cohort
@@ -214,17 +215,13 @@ class Command(BaseCommand):
         force_reprocess = options["force_reprocess"]
 
         if team_id and team_ids_option:
-            raise CommandError(
-                "Cannot use both --team-id and --team-ids. Please use only one."
-            )
+            raise CommandError("Cannot use both --team-id and --team-ids. Please use only one.")
 
         if not team_id and not team_ids_option:
             raise CommandError("Must provide either --team-id or --team-ids")
 
         if cohort_id and team_ids_option:
-            raise CommandError(
-                "Cannot use --cohort-id with --team-ids. Use --cohort-id only with --team-id."
-            )
+            raise CommandError("Cannot use --cohort-id with --team-ids. Use --cohort-id only with --team-id.")
 
         if days_override is not None and days_override <= 0:
             raise CommandError("--days must be a positive integer")
@@ -234,24 +231,16 @@ class Command(BaseCommand):
         else:
             team_ids = sorted(set(team_ids_option or []))
 
-        self.stdout.write(
-            self.style.SUCCESS(f"Processing {len(team_ids)} team(s): {team_ids}")
-        )
+        self.stdout.write(self.style.SUCCESS(f"Processing {len(team_ids)} team(s): {team_ids}"))
 
         for current_team_id in team_ids:
-            self.stdout.write(
-                self.style.SUCCESS(f"\n=== Processing Team {current_team_id} ===")
-            )
+            self.stdout.write(self.style.SUCCESS(f"\n=== Processing Team {current_team_id} ==="))
 
             if cohort_id:
                 try:
-                    cohorts = [
-                        Cohort.objects.get(id=cohort_id, team_id=current_team_id)
-                    ]
+                    cohorts = [Cohort.objects.get(id=cohort_id, team_id=current_team_id)]
                 except Cohort.DoesNotExist:
-                    raise CommandError(
-                        f"Cohort {cohort_id} not found for team {current_team_id}"
-                    )
+                    raise CommandError(f"Cohort {cohort_id} not found for team {current_team_id}")
             else:
                 cohorts = list(
                     Cohort.objects.filter(
@@ -261,17 +250,11 @@ class Command(BaseCommand):
                     ).order_by("id")
                 )
                 if not cohorts:
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"No realtime cohorts found for team {current_team_id}"
-                        )
-                    )
+                    self.stdout.write(self.style.WARNING(f"No realtime cohorts found for team {current_team_id}"))
                     continue
 
             self.stdout.write(
-                self.style.SUCCESS(
-                    f"Found {len(cohorts)} cohort(s) to evaluate for team {current_team_id}"
-                )
+                self.style.SUCCESS(f"Found {len(cohorts)} cohort(s) to evaluate for team {current_team_id}")
             )
 
             # Collect and deduplicate filters across all cohorts
@@ -299,11 +282,7 @@ class Command(BaseCommand):
 
                 cohort_ids.append(cohort.id)
                 total_original_filters += len(filters)
-                self.stdout.write(
-                    self.style.SUCCESS(
-                        f"Cohort {cohort.id}: found {len(filters)} behavioral filters"
-                    )
-                )
+                self.stdout.write(self.style.SUCCESS(f"Cohort {cohort.id}: found {len(filters)} behavioral filters"))
 
                 for f in filters:
                     if f.condition_hash not in condition_map:
@@ -315,20 +294,14 @@ class Command(BaseCommand):
                             event_filters=f.event_filters,
                             cohort_ids={cohort.id},
                         )
-                        self.stdout.write(
-                            f"  + New condition: {f.condition_hash} (event: {f.event_name})"
-                        )
+                        self.stdout.write(f"  + New condition: {f.condition_hash} (event: {f.event_name})")
                     else:
                         condition_map[f.condition_hash].cohort_ids.add(cohort.id)
-                        self.stdout.write(
-                            f"  = Duplicate condition: {f.condition_hash}"
-                        )
+                        self.stdout.write(f"  = Duplicate condition: {f.condition_hash}")
 
             if not condition_map:
                 self.stdout.write(
-                    self.style.WARNING(
-                        f"No behavioral filters found across any cohorts for team {current_team_id}"
-                    )
+                    self.style.WARNING(f"No behavioral filters found across any cohorts for team {current_team_id}")
                 )
                 continue
 
@@ -357,9 +330,7 @@ class Command(BaseCommand):
                         )
                     )
             else:
-                effective_days, auto_computed_unclamped = compute_backfill_days(
-                    deduplicated_filters
-                )
+                effective_days, auto_computed_unclamped = compute_backfill_days(deduplicated_filters)
                 if auto_computed_unclamped > MAX_BACKFILL_DAYS:
                     self.stdout.write(
                         self.style.WARNING(
@@ -403,11 +374,7 @@ class Command(BaseCommand):
                     force_reprocess=force_reprocess,
                 )
             except Exception as e:
-                self.stdout.write(
-                    self.style.ERROR(
-                        f"Failed to start workflow for team {current_team_id}: {e}"
-                    )
-                )
+                self.stdout.write(self.style.ERROR(f"Failed to start workflow for team {current_team_id}: {e}"))
                 continue
 
             self.stdout.write(
@@ -433,9 +400,7 @@ class Command(BaseCommand):
         """Run the Temporal coordinator workflow for the team."""
         filter_storage_key = store_event_filters(filters, team_id)
         self.stdout.write(
-            self.style.SUCCESS(
-                f"Stored {len(filters)} event filters in Redis with key: {filter_storage_key}"
-            )
+            self.style.SUCCESS(f"Stored {len(filters)} event filters in Redis with key: {filter_storage_key}")
         )
 
         condition_hashes = sorted({f.condition_hash for f in filters})

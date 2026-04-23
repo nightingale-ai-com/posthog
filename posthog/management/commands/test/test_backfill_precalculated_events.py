@@ -1,10 +1,13 @@
 from io import StringIO
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from posthog.test.base import BaseTest
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError, OutputWrapper
+
 from parameterized import parameterized
 from temporalio.common import WorkflowIDReusePolicy
 
@@ -20,7 +23,6 @@ from posthog.temporal.messaging.backfill_precalculated_events_coordinator_workfl
     BackfillPrecalculatedEventsCoordinatorInputs,
 )
 from posthog.temporal.messaging.types import BehavioralEventFilter
-from posthog.test.base import BaseTest
 
 
 class TestExtractBehavioralFilters(BaseTest):
@@ -388,9 +390,7 @@ class TestComputeBackfillDays(BaseTest):
             ("unknown_interval_uses_1x", [(10, "unknown")], 10, 10),
         ]
     )
-    def test_compute_backfill_days(
-        self, _name, filter_inputs, expected_clamped, expected_unclamped
-    ):
+    def test_compute_backfill_days(self, _name, filter_inputs, expected_clamped, expected_unclamped):
         filters = [self._make_filter(tv, ti) for tv, ti in filter_inputs]
         clamped, unclamped = compute_backfill_days(filters)
         assert clamped == expected_clamped
@@ -740,9 +740,7 @@ class TestBackfillPrecalculatedEventsCommand(BaseTest):
             )
 
         self.assertEqual(mock_workflow.call_count, 2)
-        team_ids_called = sorted(
-            call[1]["team_id"] for call in mock_workflow.call_args_list
-        )
+        team_ids_called = sorted(call[1]["team_id"] for call in mock_workflow.call_args_list)
         self.assertEqual(team_ids_called, sorted([self.team.id, team2.id]))
 
     def test_cohort_id_restricts_to_specific_cohort(self):
@@ -876,15 +874,9 @@ class TestRunTemporalWorkflow(BaseTest):
         self.assertEqual(inputs.concurrent_workflows, 5)
         self.assertFalse(inputs.force_reprocess)
         self.assertEqual(kwargs["task_queue"], settings.MESSAGING_TASK_QUEUE)
-        self.assertEqual(
-            kwargs["id_reuse_policy"], WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY
-        )
+        self.assertEqual(kwargs["id_reuse_policy"], WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY)
         self.assertEqual(kwargs["id"], workflow_id)
-        self.assertTrue(
-            workflow_id.startswith(
-                f"backfill-precalculated-events-team-{self.team.id}-"
-            )
-        )
+        self.assertTrue(workflow_id.startswith(f"backfill-precalculated-events-team-{self.team.id}-"))
 
     def test_workflow_id_is_unique_across_rapid_invocations(self):
         mock_client = MagicMock()

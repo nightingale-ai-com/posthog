@@ -1,19 +1,18 @@
 import asyncio
-import dataclasses
 import datetime as dt
+import dataclasses
 from typing import Any
 
-import temporalio.activity
-import temporalio.common
-import temporalio.exceptions
-import temporalio.workflow
 from django.conf import settings
+
+import temporalio.common
+import temporalio.activity
+import temporalio.workflow
+import temporalio.exceptions
 
 from posthog.temporal.common.base import PostHogWorkflow
 from posthog.temporal.common.clickhouse import get_client
-from posthog.temporal.messaging.backfill_precalculated_events_workflow import (
-    BackfillPrecalculatedEventsInputs,
-)
+from posthog.temporal.messaging.backfill_precalculated_events_workflow import BackfillPrecalculatedEventsInputs
 
 
 @dataclasses.dataclass
@@ -109,9 +108,7 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
 
     @staticmethod
     def parse_inputs(inputs: list[str]) -> BackfillPrecalculatedEventsCoordinatorInputs:
-        raise NotImplementedError(
-            "Use start_workflow() to trigger this workflow programmatically"
-        )
+        raise NotImplementedError("Use start_workflow() to trigger this workflow programmatically")
 
     async def _start_child_workflow_for_day(
         self,
@@ -168,13 +165,9 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
     @temporalio.workflow.run
     async def run(self, inputs: BackfillPrecalculatedEventsCoordinatorInputs) -> None:
         if inputs.days_to_backfill <= 0:
-            raise ValueError(
-                f"days_to_backfill must be positive, got {inputs.days_to_backfill}"
-            )
+            raise ValueError(f"days_to_backfill must be positive, got {inputs.days_to_backfill}")
         if inputs.concurrent_workflows <= 0:
-            raise ValueError(
-                f"concurrent_workflows must be positive, got {inputs.concurrent_workflows}"
-            )
+            raise ValueError(f"concurrent_workflows must be positive, got {inputs.concurrent_workflows}")
 
         workflow_logger = temporalio.workflow.logger
         workflow_logger.info(
@@ -187,9 +180,7 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
         now = temporalio.workflow.now()
         day_ranges: list[tuple[dt.datetime, dt.datetime]] = []
         for day_offset in range(inputs.days_to_backfill):
-            day_start = (now - dt.timedelta(days=day_offset)).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            day_start = (now - dt.timedelta(days=day_offset)).replace(hour=0, minute=0, second=0, microsecond=0)
             day_end = day_start + dt.timedelta(days=1)
             # For today's partial day, use now as the end
             if day_offset == 0:
@@ -230,12 +221,8 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
 
             # Respect concurrency limit
             if len(child_workflow_handles) >= inputs.concurrent_workflows:
-                done, _ = await asyncio.wait(
-                    child_workflow_handles, return_when=asyncio.FIRST_COMPLETED
-                )
-                c, f = await self._drain_completed(
-                    done, child_workflow_handles, workflow_logger
-                )
+                done, _ = await asyncio.wait(child_workflow_handles, return_when=asyncio.FIRST_COMPLETED)
+                c, f = await self._drain_completed(done, child_workflow_handles, workflow_logger)
                 completed_count += c
                 failed_count += f
 
@@ -251,12 +238,8 @@ class BackfillPrecalculatedEventsCoordinatorWorkflow(PostHogWorkflow):
             f"skipped {days_skipped} already-backfilled days"
         )
         while child_workflow_handles:
-            done, _ = await asyncio.wait(
-                child_workflow_handles, return_when=asyncio.FIRST_COMPLETED
-            )
-            c, f = await self._drain_completed(
-                done, child_workflow_handles, workflow_logger
-            )
+            done, _ = await asyncio.wait(child_workflow_handles, return_when=asyncio.FIRST_COMPLETED)
+            c, f = await self._drain_completed(done, child_workflow_handles, workflow_logger)
             completed_count += c
             failed_count += f
 

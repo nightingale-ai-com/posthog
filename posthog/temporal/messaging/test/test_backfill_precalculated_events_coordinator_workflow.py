@@ -1,6 +1,5 @@
-from unittest.mock import AsyncMock, patch
-
 import pytest
+from unittest.mock import AsyncMock, patch
 
 from posthog.temporal.messaging.backfill_precalculated_events_coordinator_workflow import (
     BackfillPrecalculatedEventsCoordinatorInputs,
@@ -93,9 +92,7 @@ class TestCheckDayAlreadyBackfilledActivity:
         ],
         ids=["all_present", "partial", "none_found"],
     )
-    async def test_backfill_status_based_on_condition_count(
-        self, condition_hashes, query_return, expected_backfilled
-    ):
+    async def test_backfill_status_based_on_condition_count(self, condition_hashes, query_return, expected_backfilled):
         inputs = EventDateCheckInputs(
             team_id=1,
             condition_hashes=condition_hashes,
