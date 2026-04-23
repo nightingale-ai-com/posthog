@@ -51,9 +51,7 @@ def backfill_precalculated_events_view(request):
             command_args.extend(["--team-id", str(form.cleaned_data["team_id"])])
 
             if form.cleaned_data.get("cohort_id"):
-                command_args.extend(
-                    ["--cohort-id", str(form.cleaned_data["cohort_id"])]
-                )
+                command_args.extend(["--cohort-id", str(form.cleaned_data["cohort_id"])])
 
             if form.cleaned_data.get("days"):
                 command_args.extend(["--days", str(form.cleaned_data["days"])])
