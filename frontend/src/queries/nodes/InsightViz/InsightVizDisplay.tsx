@@ -78,6 +78,7 @@ function DashboardInsightRefreshHintOrLoading({
                 key={queryId}
                 insightProps={insightProps}
                 renderEmptyStateAsSkeleton={context?.renderEmptyStateAsSkeleton}
+                suppressSlowQuerySuggestions={context?.suppressSlowQuerySuggestions}
             />
         )
     }
@@ -169,6 +170,7 @@ export function InsightVizDisplay({
                     key={queryId}
                     insightProps={insightProps}
                     renderEmptyStateAsSkeleton={context?.renderEmptyStateAsSkeleton}
+                    suppressSlowQuerySuggestions={context?.suppressSlowQuerySuggestions}
                 />
             )
         }
