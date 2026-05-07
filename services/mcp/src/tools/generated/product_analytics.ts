@@ -4,6 +4,8 @@ import { z } from 'zod'
 import type { Schemas } from '@/api/generated'
 import {
     InsightsActivityRetrieveParams,
+    InsightsActivityRetrieveQueryParams,
+    InsightsAllActivityRetrieveQueryParams,
     InsightsCreateBody,
     InsightsDestroyParams,
     InsightsListQueryParams,
@@ -11,6 +13,7 @@ import {
     InsightsPartialUpdateParams,
     InsightsRetrieveParams,
     InsightsRetrieveQueryParams,
+    InsightsTrendingRetrieveQueryParams,
 } from '@/generated/product_analytics/api'
 import { castStringToInt } from '@/tools/cast-helpers'
 import { withPostHogUrl, omitResponseFields, pickResponseFields, type WithPostHogUrl } from '@/tools/tool-utils'
@@ -293,16 +296,25 @@ const insightUpdate = (): ToolBase<typeof InsightUpdateSchema, WithPostHogUrl<Sc
     },
 })
 
-const InsightsActivityRetrieveSchema = InsightsActivityRetrieveParams.omit({ project_id: true })
+const InsightsActivityRetrieveSchema = InsightsActivityRetrieveParams.omit({ project_id: true }).extend(
+    InsightsActivityRetrieveQueryParams.omit({ format: true }).shape
+)
 
-const insightsActivityRetrieve = (): ToolBase<typeof InsightsActivityRetrieveSchema, unknown> => ({
+const insightsActivityRetrieve = (): ToolBase<
+    typeof InsightsActivityRetrieveSchema,
+    WithPostHogUrl<Schemas.ActivityLogPaginatedResponse>
+> => ({
     name: 'insights-activity-retrieve',
     schema: InsightsActivityRetrieveSchema,
     handler: async (context: Context, params: z.infer<typeof InsightsActivityRetrieveSchema>) => {
         const projectId = await context.stateManager.getProjectId()
-        const result = await context.api.request<unknown>({
+        const result = await context.api.request<Schemas.ActivityLogPaginatedResponse>({
             method: 'GET',
             path: `/api/projects/${encodeURIComponent(String(projectId))}/insights/${encodeURIComponent(String(params.id))}/activity/`,
+            query: {
+                limit: params.limit,
+                page: params.page,
+            },
         })
         const filtered = {
             ...result,
@@ -319,17 +331,23 @@ const insightsActivityRetrieve = (): ToolBase<typeof InsightsActivityRetrieveSch
     },
 })
 
-const InsightsAllActivityRetrieveSchema = z.object({})
+const InsightsAllActivityRetrieveSchema = InsightsAllActivityRetrieveQueryParams.omit({ format: true })
 
-const insightsAllActivityRetrieve = (): ToolBase<typeof InsightsAllActivityRetrieveSchema, unknown> => ({
+const insightsAllActivityRetrieve = (): ToolBase<
+    typeof InsightsAllActivityRetrieveSchema,
+    WithPostHogUrl<Schemas.ActivityLogPaginatedResponse>
+> => ({
     name: 'insights-all-activity-retrieve',
     schema: InsightsAllActivityRetrieveSchema,
-    // eslint-disable-next-line no-unused-vars
     handler: async (context: Context, params: z.infer<typeof InsightsAllActivityRetrieveSchema>) => {
         const projectId = await context.stateManager.getProjectId()
-        const result = await context.api.request<unknown>({
+        const result = await context.api.request<Schemas.ActivityLogPaginatedResponse>({
             method: 'GET',
             path: `/api/projects/${encodeURIComponent(String(projectId))}/insights/activity/`,
+            query: {
+                limit: params.limit,
+                page: params.page,
+            },
         })
         const filtered = {
             ...result,
@@ -413,17 +431,24 @@ const insightsList = (): ToolBase<typeof InsightsListSchema, WithPostHogUrl<Sche
     },
 })
 
-const InsightsTrendingRetrieveSchema = z.object({})
+const InsightsTrendingRetrieveSchema = InsightsTrendingRetrieveQueryParams.omit({ format: true })
 
-const insightsTrendingRetrieve = (): ToolBase<typeof InsightsTrendingRetrieveSchema, unknown> => ({
+const insightsTrendingRetrieve = (): ToolBase<
+    typeof InsightsTrendingRetrieveSchema,
+    WithPostHogUrl<Schemas.PaginatedTrendingInsightList>
+> => ({
     name: 'insights-trending-retrieve',
     schema: InsightsTrendingRetrieveSchema,
-    // eslint-disable-next-line no-unused-vars
     handler: async (context: Context, params: z.infer<typeof InsightsTrendingRetrieveSchema>) => {
         const projectId = await context.stateManager.getProjectId()
-        const result = await context.api.request<unknown>({
+        const result = await context.api.request<Schemas.PaginatedTrendingInsightList>({
             method: 'GET',
             path: `/api/projects/${encodeURIComponent(String(projectId))}/insights/trending/`,
+            query: {
+                days: params.days,
+                limit: params.limit,
+                offset: params.offset,
+            },
         })
         const filtered = {
             ...result,
