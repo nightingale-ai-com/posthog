@@ -1,12 +1,12 @@
 import type { ApiClient, GroupType } from '@/api/client'
-import { getPostHogClient } from '@/lib/analytics'
+import { hasScope } from '@/lib/api'
+import type { ScopedCache } from '@/lib/cache/ScopedCache'
 import { ErrorCode, MissingOrganizationContextError, MissingProjectContextError, wrapError } from '@/lib/errors'
 import { buildActiveEnvironmentContextPrompt } from '@/lib/instructions'
+import { getPostHogClient } from '@/lib/posthog'
 import { sanitizeHeaderValue } from '@/lib/utils'
 import type { ApiUser } from '@/schema/api'
 import type { CachedOrg, CachedProject, CachedUser, State } from '@/tools/types'
-
-import type { ScopedCache } from './cache/ScopedCache'
 
 const CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 
@@ -39,8 +39,8 @@ export class StateManager {
         const apiKeyResult = await this._api.apiKeys().current()
         if (apiKeyResult.success) {
             const { scopes, scoped_teams, scoped_organizations } = apiKeyResult.data
-            // Backend serializes Django's `null` for unscoped keys; downstream
-            // code treats these as arrays.
+            // The DRF serializer returns `null` (not `[]`) for unscoped keys, so
+            // normalize at the boundary — downstream code treats these as arrays.
             return {
                 scopes: scopes ?? [],
                 scoped_teams: scoped_teams ?? [],
@@ -282,6 +282,14 @@ export class StateManager {
         // consent checks treat "no org" as "skip", not as a hard error.
         const orgId = await this._resolveOrganizationId()
         if (!orgId) {
+            return undefined
+        }
+        // `/api/organizations/{id}/` requires `organization:read`. Project-scoped
+        // personal API keys do not carry that scope, so the fetch would 403 on
+        // every session init and dogpile error tracking. Mirror the `group:read`
+        // gate in `mcp.ts` and skip the fetch when the scope is absent.
+        const apiKey = await this.getApiKey()
+        if (!hasScope(apiKey.scopes, 'organization:read')) {
             return undefined
         }
         return this.getOrFetchCached({
