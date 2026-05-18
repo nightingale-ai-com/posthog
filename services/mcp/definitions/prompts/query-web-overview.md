@@ -4,7 +4,7 @@ Run a web analytics overview query — high-level KPIs over a period: visitors, 
 
 Pick this tool only when the answer needs **session-level math**. Session aggregation is more expensive than per-event queries — only pay for it when needed.
 
-Use `query-web-overview` when the question references: bounce rate, session duration, sessions as a count, or entry/initial values (entry page, initial channel, initial UTM).
+Use `query-web-overview` when the question references just the aggregate values across the period instead of time series for those session-level values: bounce rate, session duration, sessions as a count, or entry/initial values (entry page, initial channel, initial UTM).
 
 Use `query-trends` instead for per-event counts — pageviews, sign-ups, button clicks. Faster.
 
