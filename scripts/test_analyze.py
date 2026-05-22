@@ -22,6 +22,7 @@ from __future__ import annotations
 import sys
 import html
 import json
+import sqlite3
 import argparse
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
@@ -30,6 +31,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DURATIONS_PATH = REPO_ROOT / ".test_durations"
+HIGH_FANOUT_PATH = REPO_ROOT / "tools" / "testmon_high_fanout_files.txt"
+
+# Tests touching more files than this are treated as tracing artifacts
+# (first-test-in-shard Django bootstrap loads ~1700 production files). Capping
+# stops them from inflating the inv-frequency score across the entire suite.
+OVERBROAD_FILE_THRESHOLD = 500
 
 # pytest-split's .test_durations writes flat defaults (60.0, 18.0) for tests it
 # couldn't time properly — newly added tests, flaky reruns where the timer was
@@ -48,6 +55,17 @@ class TestRecord:
     nodeid: str
     duration: float
     status: str = "unknown"  # pass | fail | skip | error | unknown
+    files_touched: int = 0  # production files this test exercised (after high-fanout discount)
+    files_touched_uncapped: int = 0  # raw count before the over-broad cap
+    inv_freq: float = 0.0  # Σ 1/(num_tests_touching_file) — higher = covers rarer files
+    min_others: int = 0  # smallest "other tests touching this file" count across this test's files
+    rare_files: int = 0  # how many of this test's files are touched by ≤3 other tests
+    has_coverage: bool = False  # did testmon record any file deps for this test
+    file_missing: bool = False  # the test file path no longer exists on disk (stale entry)
+
+    @property
+    def is_overbroad(self) -> bool:
+        return self.files_touched_uncapped > OVERBROAD_FILE_THRESHOLD
 
     @property
     def has_suspect_duration(self) -> bool:
@@ -72,6 +90,25 @@ class TestRecord:
         """`file.py::Class` or just `file.py` for top-level tests."""
         parts = self.nodeid.split("::")
         return "::".join(parts[:2]) if len(parts) >= 2 else parts[0]
+
+    @property
+    def cluster(self) -> str:
+        """Coarse "natural cluster" — a product or top-level feature area.
+
+        - `products/<name>/...` -> `products/<name>`
+        - `posthog/<area>/<sub>/...` -> `posthog/<area>/<sub>` (e.g. posthog/hogql_queries/insights)
+        - `ee/<area>/...` -> `ee/<area>`
+        Falls back to the top-level segment for short paths.
+        """
+        path = self.nodeid.split("::", 1)[0]
+        parts = path.split("/")
+        if not parts:
+            return path
+        if parts[0] == "products" and len(parts) >= 2:
+            return f"products/{parts[1]}"
+        if parts[0] in {"posthog", "ee"} and len(parts) >= 3:
+            return "/".join(parts[:3])
+        return parts[0] if parts else path
 
     @property
     def base_name(self) -> str:
@@ -164,6 +201,54 @@ def parse_junit_dir(junit_dir: Path) -> tuple[dict[str, str], list[ShardRecord]]
     return status_by_nodeid, shards
 
 
+def load_high_fanout(path: Path) -> set[str]:
+    """Files that are touched by ~every test (settings, conftest, db routers).
+
+    Listed in `tools/testmon_high_fanout_files.txt`. Discounted from each test's
+    coverage set so the "unique coverage" metric isn't dominated by infrastructure.
+    """
+    if not path.exists():
+        return set()
+    return {ln.strip() for ln in path.read_text().splitlines() if ln.strip()}
+
+
+def load_testmon_dir(testmon_dir: Path, high_fanout: set[str]) -> dict[str, set[str]]:
+    """Read all `.testmondata` SQLite files under `testmon_dir` and merge into
+    a per-test set of source filenames.
+
+    Each shard's `.testmondata` has tables:
+      file_fp(id, filename, ...)
+      test_execution(id, test_name, duration, failed, forced, environment_id)
+      test_execution_file_fp(test_execution_id, fingerprint_id)
+
+    Within a shard, fingerprint_id == file_fp.id. Across shards we union by
+    filename. Empty SQLite files (no `file_fp` table) are skipped — they appear
+    in shards that collected no tests.
+    """
+    test_files: dict[str, set[str]] = defaultdict(set)
+    if not testmon_dir.exists():
+        return {}
+    for db_path in sorted(testmon_dir.rglob(".testmondata")):
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.OperationalError:
+            continue
+        try:
+            tbls = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "file_fp" not in tbls:
+                continue
+            files_by_id = dict(conn.execute("SELECT id, filename FROM file_fp"))
+            tests_by_id = dict(conn.execute("SELECT id, test_name FROM test_execution"))
+            for tid, fid in conn.execute("SELECT test_execution_id, fingerprint_id FROM test_execution_file_fp"):
+                tn = tests_by_id.get(tid)
+                fn = files_by_id.get(fid)
+                if tn and fn and fn not in high_fanout:
+                    test_files[tn].add(fn)
+        finally:
+            conn.close()
+    return dict(test_files)
+
+
 def status_for(nodeid: str, junit_status: dict[str, str]) -> str:
     """Best-effort map of .test_durations nodeid -> junit status.
 
@@ -181,8 +266,46 @@ def status_for(nodeid: str, junit_status: dict[str, str]) -> str:
     return junit_status.get(f"{dotted_mod}::{rest}", "unknown")
 
 
-def build_records(durations: dict[str, float], junit_status: dict[str, str]) -> list[TestRecord]:
-    return [TestRecord(nodeid=n, duration=d, status=status_for(n, junit_status)) for n, d in durations.items()]
+def build_records(
+    durations: dict[str, float],
+    junit_status: dict[str, str],
+    test_files: dict[str, set[str]] | None = None,
+) -> list[TestRecord]:
+    """Construct per-test records, joining duration + status + testmon coverage."""
+    records = [TestRecord(nodeid=n, duration=d, status=status_for(n, junit_status)) for n, d in durations.items()]
+    if not test_files:
+        return records
+
+    # Cap each test's file set to OVERBROAD_FILE_THRESHOLD when computing the
+    # cross-test frequency map, so Django bootstrap artifacts (1700+ files in
+    # the first test per shard) don't drown the signal for everyone else.
+    file_test_count: dict[str, int] = defaultdict(int)
+    for fs in test_files.values():
+        if len(fs) > OVERBROAD_FILE_THRESHOLD:
+            continue
+        for f in fs:
+            file_test_count[f] += 1
+
+    for r in records:
+        fs = test_files.get(r.nodeid)
+        if fs is None:
+            # Stale .test_durations entries: file no longer exists on disk.
+            test_file_path = r.module
+            if test_file_path and not (REPO_ROOT / test_file_path).exists():
+                r.file_missing = True
+            continue
+        r.has_coverage = True
+        r.files_touched_uncapped = len(fs)
+        r.files_touched = len(fs)
+        if r.is_overbroad:
+            continue  # over-broad tests don't get a value score
+        counts = [file_test_count[f] for f in fs if file_test_count.get(f)]
+        if not counts:
+            continue
+        r.inv_freq = sum(1.0 / c for c in counts)
+        r.min_others = min(counts) - 1  # subtract self
+        r.rare_files = sum(1 for c in counts if c <= 4)  # ≤4 incl self → ≤3 others
+    return records
 
 
 # ---- segmentation -----------------------------------------------------------
@@ -201,6 +324,85 @@ class Segment:
     @property
     def count(self) -> int:
         return len(self.members)
+
+
+def segment_by_coverage(records: list[TestRecord]) -> list[Segment]:
+    """Segment using both duration and testmon-derived coverage value.
+
+    Requires `has_coverage=True` on at least some records; tests without
+    coverage data are bucketed into `no-coverage-data` separately.
+
+    The 2×2 split (slow/fast × unique/redundant) uses:
+      - slow = duration > p95 of trustworthy durations
+      - unique = inv_freq >= median of records with coverage
+    """
+    trusted = sorted(r.duration for r in records if not r.has_suspect_duration and r.duration > 0 and r.has_coverage)
+    if not trusted:
+        # No coverage data — caller should fall back to segment_by_duration.
+        return []
+    # Slow = top 1% by duration (true outliers). Above this is "actually slow."
+    slow_threshold = trusted[int(len(trusted) * 0.99)]
+    covered = [r for r in records if r.has_coverage and not r.is_overbroad and r.duration > 0]
+    invs = sorted(r.inv_freq for r in covered)
+    # Median inv_freq splits "covers rarer code" from "covers only common code".
+    rarity_threshold = invs[len(invs) // 2] if invs else 0.0
+
+    segments = [
+        Segment(
+            "slow_dispensable",
+            f"⚠ OPTIMIZE OR DROP — duration ≥ {slow_threshold:.1f}s and covers only commonly-tested files",
+        ),
+        Segment(
+            "slow_irreplaceable",
+            f"⚠ OPTIMIZE — duration ≥ {slow_threshold:.1f}s but covers rarer code (don't delete)",
+        ),
+        Segment(
+            "fast_valuable",
+            "✓ KEEP — fast workhorse covering rarer code",
+        ),
+        Segment(
+            "fast_broad_only",
+            "○ LOW PRIORITY — fast but only touches popular files (NOT a delete candidate, just no value to optimize)",
+        ),
+        Segment(
+            "over_broad_tracer",
+            f"○ DATA NOISE — >{OVERBROAD_FILE_THRESHOLD} files touched (first-test-in-shard Django bootstrap)",
+        ),
+        Segment(
+            "stale_entry",
+            "△ STALE — test file no longer exists; .test_durations needs cleaning",
+        ),
+        Segment(
+            "missing_coverage",
+            "△ NO DATA — test file exists but no testmon record (Products turbo or empty shard)",
+        ),
+        Segment(
+            "suspect_duration",
+            "△ UNTRUSTED TIMING — flat 60.0/18.0 default from pytest-split, not a real measurement",
+        ),
+    ]
+    by_name = {s.name: s for s in segments}
+
+    for r in records:
+        if r.has_suspect_duration:
+            by_name["suspect_duration"].members.append(r)
+        elif not r.has_coverage:
+            target = "stale_entry" if r.file_missing else "missing_coverage"
+            by_name[target].members.append(r)
+        elif r.is_overbroad:
+            by_name["over_broad_tracer"].members.append(r)
+        else:
+            slow = r.duration >= slow_threshold
+            rare = r.inv_freq >= rarity_threshold
+            if slow and not rare:
+                by_name["slow_dispensable"].members.append(r)
+            elif slow and rare:
+                by_name["slow_irreplaceable"].members.append(r)
+            elif rare:
+                by_name["fast_valuable"].members.append(r)
+            else:
+                by_name["fast_broad_only"].members.append(r)
+    return segments
 
 
 def segment_records(records: list[TestRecord]) -> list[Segment]:
@@ -243,6 +445,21 @@ def segment_records(records: list[TestRecord]) -> list[Segment]:
 
 
 @dataclass
+class ClusterStats:
+    """Per-cluster (product or feature-area) resource & coverage roll-up."""
+
+    name: str
+    test_count: int
+    total_time: float
+    mean_duration: float
+    cov_count: int  # tests with testmon data
+    unique_files: int  # cardinality of union of all files touched by cluster's tests
+    mean_files: float  # avg files touched (over tests with coverage)
+    mean_inv_freq: float  # avg rarity-weighted coverage (lower = more redundant)
+    files_per_hour: float  # unique_files / total_time → "value density"
+
+
+@dataclass
 class Aggregations:
     """Cross-cutting summaries used by both markdown and HTML renderers."""
 
@@ -256,10 +473,11 @@ class Aggregations:
     by_package: list[tuple[str, float, int, float]]  # name, total, count, median
     by_class: list[tuple[str, float, int]]  # class_id, total, count
     by_base: list[tuple[str, int, float]]  # base nodeid, param count, total time
+    by_cluster: list[ClusterStats]
     status_counts: Counter[str]
 
 
-def compute_aggregations(records: list[TestRecord]) -> Aggregations:
+def compute_aggregations(records: list[TestRecord], test_files: dict[str, set[str]] | None = None) -> Aggregations:
     total = sum(r.duration for r in records)
     durs = sorted(r.duration for r in records)
     n = len(durs) or 1
@@ -301,6 +519,8 @@ def compute_aggregations(records: list[TestRecord]) -> Aggregations:
         key=lambda r: (-r[1], -r[2]),
     )[:25]
 
+    by_cluster = _compute_clusters(records, test_files=test_files)
+
     return Aggregations(
         total_time=total,
         median=median_v,
@@ -312,8 +532,54 @@ def compute_aggregations(records: list[TestRecord]) -> Aggregations:
         by_package=by_package,
         by_class=by_class,
         by_base=by_base,
+        by_cluster=by_cluster,
         status_counts=Counter(r.status for r in records),
     )
+
+
+def _compute_clusters(records: list[TestRecord], test_files: dict[str, set[str]] | None = None) -> list[ClusterStats]:
+    """Aggregate by 'natural cluster' (product or feature area).
+
+    When testmon data is loaded, also folds in the union of files each cluster
+    covers — to surface "lots of tests, few unique files" (over-tested) vs
+    "few tests, broad coverage" (efficient).
+    """
+    by_c: dict[str, list[TestRecord]] = defaultdict(list)
+    for r in records:
+        by_c[r.cluster].append(r)
+
+    # Re-derive the per-test file map from records: we stored counts but not sets.
+    # If test_files is passed explicitly use it; otherwise we approximate using
+    # files_touched (cardinality only, no union possible).
+    out: list[ClusterStats] = []
+    for name, rs in by_c.items():
+        total_t = sum(r.duration for r in rs)
+        cov_rs = [r for r in rs if r.has_coverage and not r.is_overbroad]
+        unique_files = 0
+        if test_files is not None and cov_rs:
+            union: set[str] = set()
+            for r in cov_rs:
+                fs = test_files.get(r.nodeid)
+                if fs is not None and len(fs) <= OVERBROAD_FILE_THRESHOLD:
+                    union |= fs
+            unique_files = len(union)
+        mean_files = (sum(r.files_touched for r in cov_rs) / len(cov_rs)) if cov_rs else 0.0
+        mean_inv = (sum(r.inv_freq for r in cov_rs) / len(cov_rs)) if cov_rs else 0.0
+        files_per_hour = (unique_files / (total_t / 3600)) if total_t > 0 and unique_files > 0 else 0.0
+        out.append(
+            ClusterStats(
+                name=name,
+                test_count=len(rs),
+                total_time=total_t,
+                mean_duration=total_t / len(rs) if rs else 0,
+                cov_count=len(cov_rs),
+                unique_files=unique_files,
+                mean_files=mean_files,
+                mean_inv_freq=mean_inv,
+                files_per_hour=files_per_hour,
+            )
+        )
+    return sorted(out, key=lambda c: -c.total_time)
 
 
 # ---- formatters -------------------------------------------------------------
@@ -363,15 +629,15 @@ def render_markdown(
             f"**Setup/teardown overhead: {_fmt_h(overhead)} ({100 * overhead / wall:.1f}%)**"
         )
         lines.append("")
-        sranked = sorted(shards, key=lambda s: -s.overhead)
+        sranked = sorted(shards, key=lambda x: -x.overhead)
         lines.append("### Top 10 shards by setup overhead")
         lines.append("")
         lines.append("| shard | suite | testcase | overhead | overhead % | tests |")
         lines.append("|---|---:|---:|---:|---:|---:|")
-        for s in sranked[:10]:
+        for sh in sranked[:10]:
             lines.append(
-                f"| {s.name} | {s.suite_time:.0f}s | {s.testcase_sum:.0f}s | "
-                f"{s.overhead:.0f}s | {s.overhead_pct:.1f}% | {s.test_count} |"
+                f"| {sh.name} | {sh.suite_time:.0f}s | {sh.testcase_sum:.0f}s | "
+                f"{sh.overhead:.0f}s | {sh.overhead_pct:.1f}% | {sh.test_count} |"
             )
         lines.append("")
 
@@ -433,7 +699,8 @@ def render_markdown(
 
 CSS = """
 :root { --fg:#0f172a; --muted:#64748b; --bg:#f8fafc; --card:#fff; --line:#e2e8f0;
-        --accent:#0ea5e9; --warn:#dc2626; --ok:#16a34a; }
+        --accent:#0ea5e9; --warn:#dc2626; --ok:#16a34a;
+        --act-drop:#dc2626; --act-opt:#d97706; --act-keep:#16a34a; --act-low:#64748b; --act-data:#7c3aed; }
 * { box-sizing: border-box; }
 body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
        color: var(--fg); background: var(--bg); margin: 0; padding: 24px; }
@@ -455,7 +722,7 @@ th { background: #f1f5f9; font-weight: 600; color: var(--fg); font-size: 12px; t
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 tr:last-child td { border-bottom: 0; }
 code { font: 12px/1.3 'SF Mono', 'Monaco', monospace; background: #f1f5f9; padding: 1px 4px; border-radius: 3px; }
-.path { font: 12px/1.3 'SF Mono', 'Monaco', monospace; color: var(--fg); }
+.path { font: 12px/1.3 'SF Mono', 'Monaco', monospace; color: var(--fg); overflow-wrap: anywhere; white-space: normal; max-width: 600px; }
 .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
 .badge.pass { background: #dcfce7; color: var(--ok); }
 .badge.fail, .badge.error { background: #fee2e2; color: var(--warn); }
@@ -473,7 +740,47 @@ details > summary { cursor: pointer; padding: 6px 0; color: var(--accent); font-
 .legend .sw.testcase { background: var(--accent); }
 .legend .sw.overhead { background: #fca5a5; }
 .footnote { color: var(--muted); font-size: 12px; margin-top: 8px; }
+/* Executive summary banner */
+.banner { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 6px;
+          padding: 16px 20px; margin: 0 0 24px; }
+.banner h2 { font-size: 14px; margin: 0 0 8px; padding: 0; border: 0; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.banner .finding { font-size: 14px; line-height: 1.6; margin: 0 0 6px; }
+.banner .finding strong { font-weight: 600; }
+.banner .num { font-variant-numeric: tabular-nums; font-weight: 600; }
+.banner .num.bad { color: var(--act-drop); }
+.banner .num.warn { color: var(--act-opt); }
+/* Action labels */
+.act { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 700;
+       text-transform: uppercase; letter-spacing: .04em; }
+.act-drop { background: #fef2f2; color: var(--act-drop); border: 1px solid #fecaca; }
+.act-opt  { background: #fffbeb; color: var(--act-opt);  border: 1px solid #fed7aa; }
+.act-keep { background: #f0fdf4; color: var(--act-keep); border: 1px solid #bbf7d0; }
+.act-low  { background: #f8fafc; color: var(--act-low);  border: 1px solid #e2e8f0; }
+.act-data { background: #faf5ff; color: var(--act-data); border: 1px solid #e9d5ff; }
+/* Segment row coloring */
+tr.seg-drop td:first-child { border-left: 3px solid var(--act-drop); }
+tr.seg-opt  td:first-child { border-left: 3px solid var(--act-opt); }
+tr.seg-keep td:first-child { border-left: 3px solid var(--act-keep); }
+tr.seg-low  td:first-child { border-left: 3px solid var(--act-low); }
+tr.seg-data td:first-child { border-left: 3px solid var(--act-data); }
+/* Methods footer */
+.methods { background: #f1f5f9; border-radius: 6px; padding: 16px 20px; margin-top: 32px; font-size: 12px; color: var(--muted); }
+.methods h3 { margin: 0 0 8px; color: var(--fg); font-size: 13px; }
+.methods dt { font-weight: 600; color: var(--fg); margin-top: 8px; }
+.methods dd { margin: 2px 0 0 0; }
 """
+
+# Map segment name -> action label class + display label.
+SEGMENT_ACTIONS: dict[str, tuple[str, str]] = {
+    "slow_dispensable": ("drop", "OPTIMIZE OR DROP"),
+    "slow_irreplaceable": ("opt", "OPTIMIZE"),
+    "fast_valuable": ("keep", "KEEP"),
+    "fast_broad_only": ("low", "LOW PRIORITY"),
+    "over_broad_tracer": ("data", "DATA NOISE"),
+    "stale_entry": ("data", "STALE"),
+    "missing_coverage": ("data", "NO DATA"),
+    "suspect_duration": ("data", "UNTRUSTED TIMING"),
+}
 
 
 def _h(s: str | float) -> str:
@@ -498,23 +805,126 @@ def _status_badge(status: str) -> str:
 def _shard_bars(shards: list[ShardRecord]) -> str:
     if not shards:
         return ""
-    max_time = max(s.suite_time for s in shards)
+    max_time = max(sh.suite_time for sh in shards)
     rows: list[str] = []
-    for s in sorted(shards, key=lambda x: -x.suite_time):
-        tc_pct = 100 * s.testcase_sum / max_time
+    for sh in sorted(shards, key=lambda x: -x.suite_time):
+        tc_pct = 100 * sh.testcase_sum / max_time
         ov_left_pct = tc_pct
-        ov_pct = 100 * s.overhead / max_time
+        ov_pct = 100 * sh.overhead / max_time
         rows.append(
             f'<div class="bar-row">'
-            f'<div class="label">{_h(s.name)}</div>'
+            f'<div class="label">{_h(sh.name)}</div>'
             f'<div class="bar">'
             f'<div class="testcase" style="width:{tc_pct:.2f}%"></div>'
             f'<div class="overhead" style="left:{ov_left_pct:.2f}%;width:{ov_pct:.2f}%"></div>'
             f"</div>"
-            f'<div class="value">{s.suite_time:.0f}s · {s.test_count} tests</div>'
+            f'<div class="value">{sh.suite_time:.0f}s · {sh.test_count} tests</div>'
             f"</div>"
         )
     return "\n".join(rows)
+
+
+def _exec_summary(
+    records: list[TestRecord],
+    segments: list[Segment],
+    shards: list[ShardRecord],
+) -> str:
+    """3-5 line top-of-page banner with the most actionable findings."""
+    findings: list[str] = []
+    seg_by_name = {s.name: s for s in segments}
+    if shards:
+        wall = sum(sh.suite_time for sh in shards)
+        tc_sum = sum(sh.testcase_sum for sh in shards)
+        overhead = wall - tc_sum
+        pct = 100 * overhead / wall if wall else 0
+        cls = "bad" if pct > 70 else "warn" if pct > 40 else ""
+        findings.append(
+            f"<p class='finding'>● <strong>Setup overhead dominates CI</strong>: "
+            f"<span class='num {cls}'>{pct:.0f}%</span> of suite wall ({_fmt_h(overhead)} of {_fmt_h(wall)}) "
+            f"is fixtures / DB migrations / container boot, not test code. "
+            f"Optimizing tests alone caps at the remaining <span class='num'>{_fmt_h(tc_sum)}</span>.</p>"
+        )
+        slowest = max(shards, key=lambda x: x.suite_time)
+        fastest = min(shards, key=lambda x: x.suite_time)
+        ratio = slowest.suite_time / fastest.suite_time if fastest.suite_time else 0
+        if ratio > 4:
+            findings.append(
+                f"<p class='finding'>● <strong>Shard imbalance</strong>: slowest shard is "
+                f"<span class='num warn'>{ratio:.1f}×</span> the fastest "
+                f"(<code>{_h(slowest.name)}</code> {slowest.suite_time:.0f}s vs "
+                f"<code>{_h(fastest.name)}</code> {fastest.suite_time:.0f}s). "
+                f"CI wall clock is gated by the slowest shard, not the mean.</p>"
+            )
+    sd = seg_by_name.get("slow_dispensable")
+    if sd and sd.members:
+        # Group by base test (without [param]) to find over-parametrization clusters
+        by_base: dict[str, list[TestRecord]] = defaultdict(list)
+        for r in sd.members:
+            by_base[r.base_name].append(r)
+        top_clusters = sorted(by_base.items(), key=lambda kv: -sum(r.duration for r in kv[1]))[:3]
+        cluster_desc = ", ".join(
+            f"<code>{_h(b.rsplit('::', 1)[-1])}</code> ({len(rs)} variants, {_fmt_h(sum(r.duration for r in rs))})"
+            for b, rs in top_clusters
+            if len(rs) > 1
+        )
+        findings.append(
+            f"<p class='finding'>● <strong>Drop/optimize candidates</strong>: "
+            f"<span class='num bad'>{sd.count}</span> tests = "
+            f"<span class='num'>{_fmt_h(sd.total_time)}</span> are slow AND cover only commonly-tested code."
+            + (f" Top parametrization clusters: {cluster_desc}." if cluster_desc else "")
+            + "</p>"
+        )
+    si = seg_by_name.get("slow_irreplaceable")
+    if si and si.members:
+        findings.append(
+            f"<p class='finding'>● <strong>Optimize (don't delete)</strong>: "
+            f"<span class='num warn'>{si.count:,}</span> slow tests cover rarer code — "
+            f"<span class='num'>{_fmt_h(si.total_time)}</span> of suite time. Faster fixtures or parallelism, not pruning.</p>"
+        )
+    susp = seg_by_name.get("suspect_duration")
+    if susp and susp.count > 0:
+        findings.append(
+            f"<p class='finding'>● <strong>Untrusted timings</strong>: "
+            f"<span class='num'>{susp.count}</span> tests have flat default values in "
+            f"<code>.test_durations</code> ({_fmt_h(susp.total_time)} of recorded time). "
+            f"These need a clean re-measurement before optimization claims.</p>"
+        )
+    missing = seg_by_name.get("missing_coverage")
+    stale = seg_by_name.get("stale_entry")
+    if missing and missing.count > 0:
+        gap_pct = 100 * missing.count / len(records)
+        findings.append(
+            f"<p class='finding'>● <strong>Coverage data gap</strong>: "
+            f"<span class='num'>{missing.count:,}</span> tests ({gap_pct:.0f}% of suite) lack testmon data — "
+            f"Products turbo job didn't upload + 6 empty Core-poe1 shards. "
+            + (
+                f"<span class='num'>{stale.count:,}</span> additional entries are <em>stale</em> (test file gone)."
+                if stale and stale.count
+                else ""
+            )
+            + "</p>"
+        )
+    if not findings:
+        return ""
+    return "<div class='banner'><h2>Key findings</h2>" + "".join(findings) + "</div>"
+
+
+def _action_badge(seg_name: str) -> str:
+    cls_short, label = SEGMENT_ACTIONS.get(seg_name, ("low", seg_name))
+    return f"<span class='act act-{cls_short}'>{label}</span>"
+
+
+def _action_row_class(seg_name: str) -> str:
+    cls_short, _ = SEGMENT_ACTIONS.get(seg_name, ("low", seg_name))
+    return f"seg-{cls_short}"
+
+
+def _parametrization_cluster(members: list[TestRecord]) -> list[tuple[str, list[TestRecord]]]:
+    """Group test records by their parametrization base name."""
+    by_base: dict[str, list[TestRecord]] = defaultdict(list)
+    for r in members:
+        by_base[r.base_name].append(r)
+    return sorted(by_base.items(), key=lambda kv: -sum(r.duration for r in kv[1]))
 
 
 def render_html(
@@ -536,16 +946,19 @@ def render_html(
         f"max {aggs.max_time:.1f}s</p>"
     )
 
+    # Executive summary up front.
+    parts.append(_exec_summary(records, segments, shards))
+
     # Headline cards.
     cards = [
         _card("Tests", f"{len(records):,}"),
-        _card("Total test-time", _fmt_h(total), "single-threaded"),
+        _card("Total test-time", _fmt_h(total), "single-threaded sum"),
         _card("50% of time in", f"{aggs.pareto_50:,} tests", f"{100 * aggs.pareto_50 / len(records):.1f}% of suite"),
         _card("80% of time in", f"{aggs.pareto_80:,} tests", f"{100 * aggs.pareto_80 / len(records):.1f}% of suite"),
     ]
     if shards:
-        wall = sum(s.suite_time for s in shards)
-        tc_sum = sum(s.testcase_sum for s in shards)
+        wall = sum(sh.suite_time for sh in shards)
+        tc_sum = sum(sh.testcase_sum for sh in shards)
         overhead = wall - tc_sum
         cards.extend(
             [
@@ -559,8 +972,25 @@ def render_html(
                 ),
                 _card(
                     "Slowest/fastest shard",
-                    f"{max(s.suite_time for s in shards) / min(s.suite_time for s in shards):.1f}×",
-                    f"{min(s.suite_time for s in shards):.0f}s – {max(s.suite_time for s in shards):.0f}s",
+                    f"{max(sh.suite_time for sh in shards) / min(sh.suite_time for sh in shards):.1f}×",
+                    f"{min(sh.suite_time for sh in shards):.0f}s – {max(sh.suite_time for sh in shards):.0f}s",
+                ),
+            ]
+        )
+    cov_records = [r for r in records if r.has_coverage]
+    if cov_records:
+        overbroad = sum(1 for r in cov_records if r.is_overbroad)
+        cards.extend(
+            [
+                _card(
+                    "Coverage data",
+                    f"{len(cov_records):,} tests",
+                    f"{100 * len(cov_records) / len(records):.1f}% of suite",
+                ),
+                _card(
+                    "Over-broad tracers",
+                    f"{overbroad:,}",
+                    f">{OVERBROAD_FILE_THRESHOLD} files — bootstrap artifacts",
                 ),
             ]
         )
@@ -590,30 +1020,39 @@ def render_html(
             "<th class='num'>Overhead</th><th class='num'>Overhead %</th>"
             "<th class='num'>Tests</th><th class='num'>Skips</th></tr></thead><tbody>"
         )
-        for s in sorted(shards, key=lambda x: -x.overhead)[:15]:
+        for sh in sorted(shards, key=lambda x: -x.overhead)[:15]:
             parts.append(
-                f"<tr><td class='path'>{_h(s.name)}</td>"
-                f"<td class='num'>{s.suite_time:.0f}s</td>"
-                f"<td class='num'>{s.testcase_sum:.0f}s</td>"
-                f"<td class='num'>{s.overhead:.0f}s</td>"
-                f"<td class='num'>{s.overhead_pct:.1f}%</td>"
-                f"<td class='num'>{s.test_count}</td>"
-                f"<td class='num'>{s.skip_count}</td></tr>"
+                f"<tr><td class='path'>{_h(sh.name)}</td>"
+                f"<td class='num'>{sh.suite_time:.0f}s</td>"
+                f"<td class='num'>{sh.testcase_sum:.0f}s</td>"
+                f"<td class='num'>{sh.overhead:.0f}s</td>"
+                f"<td class='num'>{sh.overhead_pct:.1f}%</td>"
+                f"<td class='num'>{sh.test_count}</td>"
+                f"<td class='num'>{sh.skip_count}</td></tr>"
             )
         parts.append("</tbody></table>")
 
-    # Duration segments.
-    parts.append("<h2>Duration segments</h2>")
+    # Archetype segments (color-coded with action labels).
+    parts.append("<h2>Archetype segments</h2>")
     parts.append(
-        "<table><thead><tr><th>Segment</th><th class='num'>Tests</th>"
-        "<th class='num'>Total time</th><th class='num'>% of suite</th>"
+        "<p class='footnote'>Each test lands in exactly one bucket. Rows are color-coded by recommended action: "
+        "<span class='act act-drop'>drop</span> = strongest pruning candidate; "
+        "<span class='act act-opt'>optimize</span> = slow but valuable; "
+        "<span class='act act-keep'>keep</span> = workhorse; "
+        "<span class='act act-low'>low priority</span> = no value to optimize; "
+        "<span class='act act-data'>data</span> = ignore for now (measurement noise / missing input).</p>"
+    )
+    parts.append(
+        "<table><thead><tr><th>Action</th><th>Segment</th><th class='num'>Tests</th>"
+        "<th class='num'>Total time</th><th class='num'>% of recorded</th>"
         "<th>Description</th></tr></thead><tbody>"
     )
     for s in segments:
         pct = 100 * s.total_time / total if total else 0
-        warn_cls = " class='badge suspect'" if s.name == "suspect-duration" else ""
         parts.append(
-            f"<tr><td><span{warn_cls}>{_h(s.name)}</span></td>"
+            f"<tr class='{_action_row_class(s.name)}'>"
+            f"<td>{_action_badge(s.name)}</td>"
+            f"<td><code>{_h(s.name)}</code></td>"
             f"<td class='num'>{s.count:,}</td>"
             f"<td class='num'>{_fmt_h(s.total_time)}</td>"
             f"<td class='num'>{pct:.1f}%</td>"
@@ -621,18 +1060,168 @@ def render_html(
         )
     parts.append("</tbody></table>")
 
+    # Per-segment drill-down. For drop/optimize segments, group by base test name
+    # so over-parametrized families show as one row rather than dozens.
+    actionable = {"slow_dispensable", "slow_irreplaceable"}
     for s in segments:
-        if not s.members or s.name == "fast":
-            continue
-        parts.append(f"<details><summary>{_h(s.name)} — top 25</summary><table>")
-        parts.append("<thead><tr><th class='num'>Duration</th><th>Test</th><th>Status</th></tr></thead><tbody>")
-        for r in sorted(s.members, key=lambda x: -x.duration)[:25]:
+        if not s.members or s.name in {"fast_valuable", "fast_broad_only"}:
+            continue  # only deep-dive on actionable + data-issue buckets
+        if s.name in actionable:
+            clusters = _parametrization_cluster(s.members)
+            multi = [(b, rs) for b, rs in clusters if len(rs) > 1]
+            singles = [(b, rs) for b, rs in clusters if len(rs) == 1]
+            details_open = " open" if s.name == "slow_dispensable" else ""
             parts.append(
-                f"<tr><td class='num'>{r.duration:.2f}s</td>"
-                f"<td class='path'>{_h(r.nodeid)}</td>"
-                f"<td>{_status_badge(r.status)}</td></tr>"
+                f"<details{details_open}><summary>{_action_badge(s.name)} {_h(s.name)} — {s.count:,} tests, {_fmt_h(s.total_time)}</summary>"
             )
-        parts.append("</tbody></table></details>")
+            if multi:
+                parts.append("<h3>Parametrization clusters (group by base test)</h3>")
+                parts.append(
+                    "<table><thead><tr><th>Base test</th>"
+                    "<th class='num'>Variants</th><th class='num'>Total time</th>"
+                    "<th class='num'>Mean</th><th class='num'>Mean files</th>"
+                    "<th class='num'>Mean invFreq</th></tr></thead><tbody>"
+                )
+                for base, rs in multi[:20]:
+                    tot = sum(r.duration for r in rs)
+                    mean_files = sum(r.files_touched for r in rs) / len(rs)
+                    mean_inv = sum(r.inv_freq for r in rs) / len(rs)
+                    parts.append(
+                        f"<tr><td class='path'>{_h(base)}</td>"
+                        f"<td class='num'>{len(rs)}</td>"
+                        f"<td class='num'>{_fmt_h(tot)}</td>"
+                        f"<td class='num'>{tot / len(rs):.2f}s</td>"
+                        f"<td class='num'>{mean_files:.0f}</td>"
+                        f"<td class='num'>{mean_inv:.2f}</td></tr>"
+                    )
+                parts.append("</tbody></table>")
+            if singles:
+                parts.append("<h3>Individual tests (no parametrization)</h3>")
+                parts.append(
+                    "<table><thead><tr><th class='num'>Duration</th><th>Test</th>"
+                    "<th class='num'>Files</th><th class='num'>invFreq</th>"
+                    "<th class='num'>min others</th></tr></thead><tbody>"
+                )
+                for _, rs in sorted(singles, key=lambda kv: -kv[1][0].duration)[:25]:
+                    r = rs[0]
+                    parts.append(
+                        f"<tr><td class='num'>{r.duration:.2f}s</td>"
+                        f"<td class='path'>{_h(r.nodeid)}</td>"
+                        f"<td class='num'>{r.files_touched}</td>"
+                        f"<td class='num'>{r.inv_freq:.2f}</td>"
+                        f"<td class='num'>{r.min_others}</td></tr>"
+                    )
+                parts.append("</tbody></table>")
+            parts.append("</details>")
+        else:
+            # Data-issue segments: simple top-25 list, collapsed.
+            parts.append(
+                f"<details><summary>{_action_badge(s.name)} {_h(s.name)} — {s.count:,} tests, {_fmt_h(s.total_time)}</summary>"
+            )
+            parts.append("<table><thead><tr><th class='num'>Duration</th><th>Test</th></tr></thead><tbody>")
+            for r in sorted(s.members, key=lambda x: -x.duration)[:25]:
+                parts.append(f"<tr><td class='num'>{r.duration:.2f}s</td><td class='path'>{_h(r.nodeid)}</td></tr>")
+            parts.append("</tbody></table></details>")
+
+    # Cluster view: resource consumption by product / feature area.
+    if aggs.by_cluster:
+        parts.append("<h2>Resource consumption by cluster (product or feature area)</h2>")
+        parts.append(
+            "<p class='footnote'>Tests grouped by their first 2–3 path segments: "
+            "<code>products/&lt;name&gt;</code> for product apps, "
+            "<code>posthog/&lt;area&gt;/&lt;sub&gt;</code> for core features, "
+            "<code>ee/&lt;area&gt;</code> for enterprise add-ons. "
+            "<strong>Unique files</strong> is the union of source files all the cluster's tests touch (testmon). "
+            "<strong>Files/hour</strong> is unique_files / total_time — higher = more code covered per minute of CI. "
+            "<strong>Mean invFreq</strong> averages each test's rarity-weighted coverage; lower = the cluster mostly covers commonly-tested code.</p>"
+        )
+        # Top 25 by total time (the biggest CI sinks)
+        parts.append("<h3>Biggest CI cost (top 25 by total time)</h3>")
+        parts.append(
+            "<table><thead><tr><th>Cluster</th>"
+            "<th class='num'>Tests</th><th class='num'>Total time</th>"
+            "<th class='num'>Mean</th><th class='num'>Testmon coverage</th>"
+            "<th class='num'>Unique files</th><th class='num'>Files/hour</th>"
+            "<th class='num'>Mean invFreq</th></tr></thead><tbody>"
+        )
+        for c in aggs.by_cluster[:25]:
+            cov_pct = (100 * c.cov_count / c.test_count) if c.test_count else 0
+            cov_warn = "" if cov_pct >= 80 else " title='Coverage data missing for many tests'"
+            fph = f"{c.files_per_hour:.0f}" if c.files_per_hour > 0 else "—"
+            inv = f"{c.mean_inv_freq:.2f}" if c.mean_inv_freq > 0 else "—"
+            uniq = f"{c.unique_files:,}" if c.unique_files > 0 else "—"
+            parts.append(
+                f"<tr><td class='path'>{_h(c.name)}</td>"
+                f"<td class='num'>{c.test_count:,}</td>"
+                f"<td class='num'>{_fmt_h(c.total_time)}</td>"
+                f"<td class='num'>{c.mean_duration:.2f}s</td>"
+                f"<td class='num'{cov_warn}>{cov_pct:.0f}%</td>"
+                f"<td class='num'>{uniq}</td>"
+                f"<td class='num'>{fph}</td>"
+                f"<td class='num'>{inv}</td></tr>"
+            )
+        parts.append("</tbody></table>")
+
+        # Sort by *redundancy* — lowest mean_inv_freq (clusters spending lots
+        # of test time on commonly-tested code). Filter to clusters with
+        # actual coverage data (≥80% cov) and meaningful size.
+        red_candidates = [
+            c for c in aggs.by_cluster if c.cov_count > 30 and (c.cov_count / max(c.test_count, 1)) >= 0.8
+        ]
+        red_candidates.sort(key=lambda c: c.mean_inv_freq)
+        if red_candidates:
+            parts.append("<h3>Most redundant clusters (low coverage rarity, big size)</h3>")
+            parts.append(
+                "<p class='footnote'>Clusters with high coverage % (so the data is reliable) "
+                "and the <em>lowest</em> mean invFreq — meaning their tests mostly cover code "
+                "that many other tests also cover. Candidates for "
+                "<em>fewer tests, same effective coverage</em>.</p>"
+            )
+            parts.append(
+                "<table><thead><tr><th>Cluster</th>"
+                "<th class='num'>Tests</th><th class='num'>Total time</th>"
+                "<th class='num'>Mean invFreq</th><th class='num'>Unique files</th>"
+                "<th class='num'>Tests / unique file</th></tr></thead><tbody>"
+            )
+            for c in red_candidates[:15]:
+                tpf = (c.cov_count / c.unique_files) if c.unique_files > 0 else 0
+                parts.append(
+                    f"<tr><td class='path'>{_h(c.name)}</td>"
+                    f"<td class='num'>{c.test_count:,}</td>"
+                    f"<td class='num'>{_fmt_h(c.total_time)}</td>"
+                    f"<td class='num'>{c.mean_inv_freq:.2f}</td>"
+                    f"<td class='num'>{c.unique_files:,}</td>"
+                    f"<td class='num'>{tpf:.1f}</td></tr>"
+                )
+            parts.append("</tbody></table>")
+
+        # Efficiency view: files/hour. Filter to clusters with coverage.
+        eff = [c for c in aggs.by_cluster if c.files_per_hour > 0 and c.cov_count > 30]
+        eff.sort(key=lambda c: c.files_per_hour)
+        if eff:
+            parts.append("<h3>Lowest coverage efficiency (fewest files covered per hour of test time)</h3>")
+            parts.append(
+                "<p class='footnote'>Clusters spending the most test time per unique file covered. "
+                "Could mean: legitimately expensive code paths (ClickHouse, Temporal workflows), "
+                "or unnecessary repetition of the same logic.</p>"
+            )
+            parts.append(
+                "<table><thead><tr><th>Cluster</th>"
+                "<th class='num'>Tests</th><th class='num'>Total time</th>"
+                "<th class='num'>Unique files</th><th class='num'>Files/hour</th>"
+                "<th class='num'>Sec/file</th></tr></thead><tbody>"
+            )
+            for c in eff[:15]:
+                spf = c.total_time / c.unique_files if c.unique_files > 0 else 0
+                parts.append(
+                    f"<tr><td class='path'>{_h(c.name)}</td>"
+                    f"<td class='num'>{c.test_count:,}</td>"
+                    f"<td class='num'>{_fmt_h(c.total_time)}</td>"
+                    f"<td class='num'>{c.unique_files:,}</td>"
+                    f"<td class='num'>{c.files_per_hour:.0f}</td>"
+                    f"<td class='num'>{spf:.0f}s</td></tr>"
+                )
+            parts.append("</tbody></table>")
 
     # Hottest packages.
     parts.append("<h2>Hottest packages</h2>")
@@ -696,6 +1285,37 @@ def render_html(
             parts.append(f"<tr><td>{_status_badge(st) or _h(st)}</td><td class='num'>{n:,}</td></tr>")
         parts.append("</tbody></table>")
 
+    # Methods / how to read this footer.
+    parts.append(
+        "<div class='methods'><h3>How to read this report</h3>"
+        "<dl>"
+        "<dt>Duration source</dt>"
+        "<dd><code>.test_durations</code> (pytest-split): smoothed averages across master runs, clamped to a 10ms floor; "
+        "flat 60.0/18.0 entries are <em>defaults</em> (newly added tests, flaky reruns), not real timings — bucketed as <em>untrusted timing</em>.</dd>"
+        "<dt>Coverage source</dt>"
+        "<dd>pytest-testmon (<code>.testmondata</code>): per-shard SQLite recording which source files each test imported during execution. "
+        "File-level, not line-level. Merged across 46 shards. Files in <code>tools/testmon_high_fanout_files.txt</code> "
+        "(settings, conftest, DB routers, etc. touched by ~every test) are discounted from each test's set.</dd>"
+        "<dt>invFreq score</dt>"
+        "<dd>For each file <em>f</em> a test touches, add <em>1 / N</em> where <em>N</em> is the number of tests touching <em>f</em>. "
+        "Higher = test contributes coverage of rarer files. Score 0.1 ≈ all my files are heavily-tested elsewhere; "
+        "score &gt; 1.0 ≈ I cover code few other tests touch.</dd>"
+        "<dt>min others</dt>"
+        "<dd>For the rarest-covered file in the test's set, how many <em>other</em> tests also touch it. 0 = test is the only one covering at least one file.</dd>"
+        "<dt>Slow / fast cutoff</dt>"
+        '<dd>p99 of trustworthy durations. "Slow" means top-1% by duration, not just above-average.</dd>'
+        "<dt>Unique / broad cutoff</dt>"
+        '<dd>Median invFreq across tests with valid coverage. "Unique" = above-median rarity-weighted coverage.</dd>'
+        "<dt>Suite wall vs testcase sum</dt>"
+        "<dd>Wall = junit <code>testsuite time</code> per shard (includes fixture/migration/teardown overhead). "
+        "Testcase sum = sum of individual <code>testcase time</code> in that shard. "
+        "Their difference is overhead — fixture setup, DB migrations, container boot.</dd>"
+        "<dt>Known data gaps</dt>"
+        "<dd>Turbo-tests Products job doesn't currently upload <code>.testmondata</code> (workflow path mismatch); "
+        "6 Core-poe1 shards produced empty SQLite files. Both are fixable in the workflow.</dd>"
+        "</dl></div>"
+    )
+
     parts.append("</div></body></html>")
     return "".join(parts)
 
@@ -712,6 +1332,17 @@ def main() -> int:
         help="Directory tree of junit XMLs (CI artifact download). Enables shard/overhead analysis.",
     )
     parser.add_argument(
+        "--testmon-dir",
+        type=Path,
+        help="Directory of per-shard .testmondata SQLite files. Enables coverage-aware archetype segmentation.",
+    )
+    parser.add_argument(
+        "--high-fanout",
+        type=Path,
+        default=HIGH_FANOUT_PATH,
+        help="File listing source files to discount as common infrastructure (default: tools/testmon_high_fanout_files.txt).",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         help="Write report here. Extension picks format: .html (rich), .md (default).",
@@ -720,9 +1351,16 @@ def main() -> int:
 
     durations = load_durations(args.durations)
     junit_status, shards = parse_junit_dir(args.junit_dir) if args.junit_dir else ({}, [])
-    records = build_records(durations, junit_status)
-    segments = segment_records(records)
-    aggs = compute_aggregations(records)
+    high_fanout = load_high_fanout(args.high_fanout) if args.testmon_dir else set()
+    test_files = load_testmon_dir(args.testmon_dir, high_fanout) if args.testmon_dir else {}
+    records = build_records(durations, junit_status, test_files)
+    # Use coverage-aware segmentation when testmon data joins meaningfully (>1% of tests).
+    cov_records = sum(1 for r in records if r.has_coverage)
+    if cov_records > len(records) * 0.01:
+        segments = segment_by_coverage(records)
+    else:
+        segments = segment_records(records)
+    aggs = compute_aggregations(records, test_files=test_files or None)
 
     fmt = "html" if (args.out and args.out.suffix.lower() in {".html", ".htm"}) else "md"
     render = render_html if fmt == "html" else render_markdown

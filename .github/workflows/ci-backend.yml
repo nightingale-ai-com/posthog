@@ -485,12 +485,28 @@ jobs:
                   include-hidden-files: true
                   retention-days: 2
 
+            - name: Diagnose testmon file locations
+              if: ${{ github.ref == 'refs/heads/master' || contains(github.head_ref, 'testmon') || contains(github.ref_name, 'testmon') }}
+              shell: bash
+              run: |
+                  echo "=== .testmondata files anywhere in workspace ==="
+                  find . -name '.testmondata' -not -path './node_modules/*' -not -path './.git/*' 2>/dev/null || true
+                  echo "=== sizes ==="
+                  find . -name '.testmondata' -not -path './node_modules/*' -not -path './.git/*' -exec ls -la {} + 2>/dev/null || true
+
             - name: Upload testmon coverage databases
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               if: ${{ github.ref == 'refs/heads/master' || contains(github.head_ref, 'testmon') || contains(github.ref_name, 'testmon') }}
               with:
                   name: testmon-Products-${{ strategy.job-index }}
-                  path: products/**/.testmondata
+                  # Cover realistic locations: pytest's CWD when invoked by turbo is the product
+                  # dir, but --rootdir ../.. may push the file to repo root depending on
+                  # pytest-testmon's path resolution. Glob both repo root and product subdir
+                  # (with or without nested backend/).
+                  path: |
+                      .testmondata
+                      products/**/.testmondata
+                      products/**/backend/.testmondata
                   include-hidden-files: true
                   if-no-files-found: ignore
                   retention-days: 7
