@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 
 import api, { ApiConfig } from 'lib/api'
+import { isReadOnly } from 'lib/readOnlyGuard'
 
 import { isSharedView } from '~/exporter/exporterViewLogic'
 import { recentItemsModel } from '~/models/recentItemsModel'
@@ -33,7 +34,8 @@ export function trackFileSystemLogView({ type, ref, enabled = true }: TrackFileS
         isSharedView() ||
         ref === null ||
         ref === undefined ||
-        !ApiConfig.hasCurrentTeamId()
+        !ApiConfig.hasCurrentTeamId() ||
+        isReadOnly()
     ) {
         return
     }
