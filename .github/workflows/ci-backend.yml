@@ -465,11 +465,15 @@ jobs:
               env:
                   # --reuse-db: keep the test database between sequential product runs to avoid
                   # ClickHouse drop/create race conditions with ReplicatedMergeTree ZK metadata.
-                  # On master, also collect timing data for pytest-split sharding.
+                  # On master, also collect timing data for pytest-split sharding and pytest-testmon
+                  # coverage data (--testmon-noselect runs all tests but records per-test source-file
+                  # dependencies). Testmon collection is also enabled for branches whose name contains
+                  # `testmon`, so we can iterate on the data pipeline without merging.
                   PYTEST_ADDOPTS: >-
                       --reuse-db
                       ${{ needs.detect-snapshot-mode.outputs.mode == 'update' && '--snapshot-update --snapshot-warn-unused' || '' }}
                       ${{ github.ref == 'refs/heads/master' && '--store-durations --durations-path ../../.test_durations' || '' }}
+                      ${{ (github.ref == 'refs/heads/master' || contains(github.head_ref, 'testmon') || contains(github.ref_name, 'testmon')) && '--testmon-noselect' || '' }}
               run: pnpm turbo run backend:test ${{ matrix.filters }} --concurrency=1 --output-logs=full --force --log-order=stream ${{ matrix.pytest_args }}
 
             - name: Upload timing data
@@ -480,6 +484,16 @@ jobs:
                   path: .test_durations
                   include-hidden-files: true
                   retention-days: 2
+
+            - name: Upload testmon coverage databases
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              if: ${{ github.ref == 'refs/heads/master' || contains(github.head_ref, 'testmon') || contains(github.ref_name, 'testmon') }}
+              with:
+                  name: testmon-Products-${{ strategy.job-index }}
+                  path: products/**/.testmondata
+                  include-hidden-files: true
+                  if-no-files-found: ignore
+                  retention-days: 7
 
             - name: Verify new snapshots for flakiness
               if: ${{ always() && needs.detect-snapshot-mode.outputs.mode == 'update' && github.event.pull_request.head.repo.full_name == 'PostHog/posthog' }}
@@ -1545,6 +1559,15 @@ jobs:
               shell: bash
               run: echo "PYTEST_ARGS=--snapshot-update --snapshot-warn-unused" >> $GITHUB_ENV
 
+            # Testmon: collect per-test coverage data on master (or any branch
+            # whose name contains `testmon`) for offline analysis. --testmon-noselect
+            # runs all tests normally but records per-test source-file dependencies
+            # into a .testmondata SQLite, which we upload as an artifact.
+            - name: Enable testmon coverage collection
+              if: ${{ (github.ref == 'refs/heads/master' || contains(github.head_ref, 'testmon') || contains(github.ref_name, 'testmon')) && !matrix.compat }}
+              shell: bash
+              run: echo "TESTMON_ARGS=--testmon-noselect" >> $GITHUB_ENV
+
             # Tests
             - name: Log test environment diagnostics
               if: ${{ needs.changes.outputs.backend == 'true' && matrix.segment == 'Core' }}
@@ -1597,7 +1620,8 @@ jobs:
                       --reruns 2 --reruns-delay 1 \
                       -r fEsxX \
                       --junitxml=junit-core.xml \
-                      $PYTEST_ARGS
+                      $PYTEST_ARGS \
+                      $TESTMON_ARGS
                   exit_code=$?
                   set -e
                   if [ $exit_code -eq 5 ]; then
@@ -1657,7 +1681,8 @@ jobs:
                       --reruns 2 --reruns-delay 1 \
                       -r fEsxX \
                       --junitxml=junit-temporal.xml \
-                      $PYTEST_ARGS
+                      $PYTEST_ARGS \
+                      $TESTMON_ARGS
                   exit_code=$?
                   set -e
                   if [ $exit_code -eq 5 ]; then
@@ -1682,6 +1707,16 @@ jobs:
                   path: .test_durations
                   include-hidden-files: true
                   retention-days: 2
+
+            - name: Upload testmon coverage database
+              if: ${{ (github.ref == 'refs/heads/master' || contains(github.head_ref, 'testmon') || contains(github.ref_name, 'testmon')) && needs.changes.outputs.backend == 'true' && !matrix.compat }}
+              uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                  name: testmon-${{ matrix.segment }}-poe${{ matrix.person-on-events && '1' || '0' }}-g${{ matrix.group }}
+                  path: .testmondata
+                  include-hidden-files: true
+                  if-no-files-found: ignore
+                  retention-days: 7
 
             - name: Verify new snapshots for flakiness
               # Only in UPDATE mode - CHECK mode doesn't update snapshots
