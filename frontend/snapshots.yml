@@ -1819,7 +1819,7 @@ snapshots:
     filters-taxonomic-filter-headless--properties--dark:
         hash: v1.k794b7964.4ee695e5751c6f73e9742ab0cfeecf61b5adfe829cf3a0d49ab2877cae8b212f.jPN9l5TDgLRy9NzHenXHCU903UDg8-GdeGpf4PXt7aA
     filters-taxonomic-filter-headless--properties--light:
-        hash: v1.k794b7964.7af6b884e5d826df422db99e4a99d2172f3316561a499dbe386ea098b1fc54a9.rti2DMpqC0WEtd_AtG838vQlgQMHfwjBAR4uLN_HnUk
+        hash: v1.k794b7964.bd715b36b456df8730e934366a35faed4556dffa881456db1272e2804047a036.IH74-bf3miZ6nC3E0bqbzIb0km4fBh97_2XubTpcmns
     filters-taxonomic-filter-headless--suggested-filters-with-recents--dark:
         hash: v1.k794b7964.c3a6cd419610bc486261efa753816547f080f00c838bde0b8720cf12067b3b22.nxBtExiDfJ3USkhV9RY1VPU_U2dGyEYCMFbhvtOcuVs
     filters-taxonomic-filter-headless--suggested-filters-with-recents--light:
@@ -3777,7 +3777,7 @@ snapshots:
     replay-tabs-home-success--second-recording-in-list--dark:
         hash: v1.k794b7964.86c81ea7040f6caaf84212a9f43c9d862c752dbf0ad4e4235a064788dc5170a2.fXxHiZkxvTHg4HQ5qth3_uNA2O0j9RrRHfZKN7uWAqo
     replay-tabs-home-success--second-recording-in-list--light:
-        hash: v1.k794b7964.6a3b859abdad242d5a56848c17e4230cc7b23ce31f0b8f95bfb961890badadf5.jhsveJ_oQMP10NSUGiDLFNd77mc7U2j6InAPs6B6x5A
+        hash: v1.k794b7964.bfb749a4fb0422f4d4fed90bab38927276e9be2cb1d6cc817083fa1e6650cc36.lyOBOBNOmLUNc8VoueRv-nqq6fuBs7H8mlPSaaiJSm0
     scenes-app-ai-observability-conversation-display--anthropic--dark:
         hash: v1.k794b7964.9c97c85c94605b8ce34469ddb269688ff84d0c3aa87818e6f9c94745c114a434.o6eqWM3HKURlW-MBuPGhIw6sslncdZGR6-pBuz1FVBM
     scenes-app-ai-observability-conversation-display--anthropic--light:
