@@ -22,6 +22,7 @@ from __future__ import annotations
 import sys
 import html
 import json
+import math
 import sqlite3
 import argparse
 import xml.etree.ElementTree as ET
@@ -61,7 +62,7 @@ class TestRecord:
     min_others: int = 0  # smallest "other tests touching this file" count across this test's files
     rare_files: int = 0  # how many of this test's files are touched by ≤3 other tests
     has_coverage: bool = False  # did testmon record any file deps for this test
-    file_missing: bool = False  # the test file path no longer exists on disk (stale entry)
+    coverage_files: frozenset[str] = field(default_factory=frozenset)  # full file set (after high-fanout discount)
 
     @property
     def is_overbroad(self) -> bool:
@@ -289,12 +290,9 @@ def build_records(
     for r in records:
         fs = test_files.get(r.nodeid)
         if fs is None:
-            # Stale .test_durations entries: file no longer exists on disk.
-            test_file_path = r.module
-            if test_file_path and not (REPO_ROOT / test_file_path).exists():
-                r.file_missing = True
             continue
         r.has_coverage = True
+        r.coverage_files = frozenset(fs)
         r.files_touched_uncapped = len(fs)
         r.files_touched = len(fs)
         if r.is_overbroad:
@@ -369,12 +367,8 @@ def segment_by_coverage(records: list[TestRecord]) -> list[Segment]:
             f"○ DATA NOISE — >{OVERBROAD_FILE_THRESHOLD} files touched (first-test-in-shard Django bootstrap)",
         ),
         Segment(
-            "stale_entry",
-            "△ STALE — test file no longer exists; .test_durations needs cleaning",
-        ),
-        Segment(
             "missing_coverage",
-            "△ NO DATA — test file exists but no testmon record (Products turbo or empty shard)",
+            "△ NO DATA — no testmon record for this test (didn't run in this CI, Products turbo shards, or a deleted-but-not-pruned entry in .test_durations)",
         ),
         Segment(
             "suspect_duration",
@@ -387,8 +381,7 @@ def segment_by_coverage(records: list[TestRecord]) -> list[Segment]:
         if r.has_suspect_duration:
             by_name["suspect_duration"].members.append(r)
         elif not r.has_coverage:
-            target = "stale_entry" if r.file_missing else "missing_coverage"
-            by_name[target].members.append(r)
+            by_name["missing_coverage"].members.append(r)
         elif r.is_overbroad:
             by_name["over_broad_tracer"].members.append(r)
         else:
@@ -439,6 +432,232 @@ def segment_records(records: list[TestRecord]) -> list[Segment]:
         else:
             by_name["normal"].members.append(r)
     return segments
+
+
+# ---- redundancy & staleness -------------------------------------------------
+
+
+@dataclass
+class RedundancyCluster:
+    """A group of tests with overlapping coverage signatures.
+
+    isomorph: every member's coverage_files is identical (Jaccard = 1.0).
+    near-isomorph: pairwise Jaccard >= threshold (default 0.85) but < 1.0.
+
+    Within a cluster, members are sorted by duration ascending — the fastest
+    one is the representative; dropping the rest is the suggested action.
+    """
+
+    kind: str
+    members: list[TestRecord]
+    coverage_size: int
+    mean_jaccard: float
+
+    @property
+    def representative(self) -> TestRecord:
+        return self.members[0]
+
+    @property
+    def total_duration(self) -> float:
+        return sum(m.duration for m in self.members)
+
+    @property
+    def droppable_duration(self) -> float:
+        return self.total_duration - self.representative.duration
+
+
+def find_isomorphs(records: list[TestRecord]) -> list[RedundancyCluster]:
+    """Group tests by exact coverage signature — clusters >= 2 are full duplicates."""
+    by_sig: dict[frozenset[str], list[TestRecord]] = defaultdict(list)
+    for r in records:
+        if not r.has_coverage or r.is_overbroad or not r.coverage_files:
+            continue
+        by_sig[r.coverage_files].append(r)
+    clusters: list[RedundancyCluster] = []
+    for sig, members in by_sig.items():
+        if len(members) < 2:
+            continue
+        members_sorted = sorted(members, key=lambda r: r.duration)
+        clusters.append(
+            RedundancyCluster(
+                kind="isomorph",
+                members=members_sorted,
+                coverage_size=len(sig),
+                mean_jaccard=1.0,
+            )
+        )
+    return sorted(clusters, key=lambda c: c.droppable_duration, reverse=True)
+
+
+def find_near_isomorphs(
+    records: list[TestRecord],
+    isomorph_nodeids: set[str],
+    threshold: float = 0.85,
+    max_pairs: int = 5_000_000,
+) -> list[RedundancyCluster]:
+    """Union-find clusters with pairwise Jaccard >= threshold (excluding exact iso).
+
+    Pre-filters candidates by coverage-size bucket: Jaccard <= min/max, so tests
+    with very different |coverage| can be skipped. O(N^2) in the worst case but
+    in practice well under `max_pairs` after bucketing.
+    """
+    candidates = [
+        r
+        for r in records
+        if r.has_coverage and not r.is_overbroad and r.coverage_files and r.nodeid not in isomorph_nodeids
+    ]
+    # bucket-key chosen so two tests in the same bucket have size ratio >= threshold.
+    log_base = math.log(1.0 / threshold) if threshold < 1.0 else 1.0
+    buckets: dict[int, list[TestRecord]] = defaultdict(list)
+    for r in candidates:
+        n = len(r.coverage_files)
+        key = int(math.log(n) / log_base) if n > 1 else 0
+        buckets[key].append(r)
+        buckets[key + 1].append(r)  # adjacent bucket to handle boundary tests
+
+    parent: dict[str, str] = {r.nodeid: r.nodeid for r in candidates}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    pairs_checked = 0
+    seen_pairs: set[tuple[str, str]] = set()
+    for bucket_members in buckets.values():
+        if pairs_checked > max_pairs:
+            break
+        for i, r1 in enumerate(bucket_members):
+            for r2 in bucket_members[i + 1 :]:
+                pair = (r1.nodeid, r2.nodeid) if r1.nodeid < r2.nodeid else (r2.nodeid, r1.nodeid)
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                pairs_checked += 1
+                if pairs_checked > max_pairs:
+                    break
+                inter = len(r1.coverage_files & r2.coverage_files)
+                if inter == 0:
+                    continue
+                uniq = len(r1.coverage_files) + len(r2.coverage_files) - inter
+                jacc = inter / uniq
+                if threshold <= jacc < 1.0:
+                    union(r1.nodeid, r2.nodeid)
+            if pairs_checked > max_pairs:
+                break
+
+    by_root: dict[str, list[TestRecord]] = defaultdict(list)
+    for r in candidates:
+        by_root[find(r.nodeid)].append(r)
+
+    clusters: list[RedundancyCluster] = []
+    for members in by_root.values():
+        if len(members) < 2:
+            continue
+        members_sorted = sorted(members, key=lambda r: r.duration)
+        union_cov: set[str] = set()
+        for m in members_sorted:
+            union_cov |= m.coverage_files
+        # mean pairwise Jaccard only for small clusters (cheap), otherwise approximate.
+        if len(members_sorted) <= 8:
+            jacc_sum = 0.0
+            jacc_n = 0
+            for i, a in enumerate(members_sorted):
+                for b in members_sorted[i + 1 :]:
+                    inter = len(a.coverage_files & b.coverage_files)
+                    uniq = len(a.coverage_files | b.coverage_files)
+                    if uniq:
+                        jacc_sum += inter / uniq
+                        jacc_n += 1
+            mean_j = jacc_sum / jacc_n if jacc_n else 0.0
+        else:
+            mean_j = threshold  # placeholder; not worth O(k^2) for big clusters
+        clusters.append(
+            RedundancyCluster(
+                kind="near-isomorph",
+                members=members_sorted,
+                coverage_size=len(union_cov),
+                mean_jaccard=mean_j,
+            )
+        )
+    return sorted(clusters, key=lambda c: c.droppable_duration, reverse=True)
+
+
+def find_quarantined(records: list[TestRecord]) -> list[TestRecord]:
+    """Tests with junit status = skip that still cost collection time."""
+    return sorted(
+        [r for r in records if r.status == "skip" and r.duration > 0],
+        key=lambda r: r.duration,
+        reverse=True,
+    )
+
+
+def find_trivial_coverage(records: list[TestRecord]) -> list[TestRecord]:
+    """Tests touching only test-helper files / their own module — no production code.
+
+    Heuristic: every covered file lives under a tests/ directory, contains `/test_`,
+    ends with `/tests.py`, or is the test's own module. These exercise no production
+    paths, so deleting them doesn't lose meaningful coverage.
+    """
+    out: list[TestRecord] = []
+    for r in records:
+        if not r.has_coverage or r.is_overbroad or not r.coverage_files:
+            continue
+        own_module = r.module
+        non_test_non_self = [
+            f
+            for f in r.coverage_files
+            if f != own_module and not f.endswith("/tests.py") and "/tests/" not in f and "/test_" not in f
+        ]
+        if not non_test_non_self:
+            out.append(r)
+    return sorted(out, key=lambda r: r.duration, reverse=True)
+
+
+@dataclass
+class RedundancyAnalysis:
+    """All redundancy + staleness findings, plus the savings tally."""
+
+    isomorphs: list[RedundancyCluster]
+    near_isomorphs: list[RedundancyCluster]
+    quarantined: list[TestRecord]
+    trivial: list[TestRecord]
+
+    @property
+    def total_drop_savings(self) -> float:
+        """Time saved if we delete isomorph extras + quarantined + trivial-coverage tests."""
+        iso = sum(c.droppable_duration for c in self.isomorphs)
+        quar = sum(r.duration for r in self.quarantined)
+        triv = sum(r.duration for r in self.trivial)
+        return iso + quar + triv
+
+    @property
+    def drop_count(self) -> int:
+        iso = sum(len(c.members) - 1 for c in self.isomorphs)
+        return iso + len(self.quarantined) + len(self.trivial)
+
+    @property
+    def review_savings(self) -> float:
+        """Time saved if near-isomorph clusters get consolidated (lower confidence — needs human review)."""
+        return sum(c.droppable_duration for c in self.near_isomorphs)
+
+
+def analyze_redundancy(records: list[TestRecord]) -> RedundancyAnalysis:
+    iso = find_isomorphs(records)
+    iso_nodeids = {m.nodeid for c in iso for m in c.members}
+    near = find_near_isomorphs(records, iso_nodeids)
+    return RedundancyAnalysis(
+        isomorphs=iso,
+        near_isomorphs=near,
+        quarantined=find_quarantined(records),
+        trivial=find_trivial_coverage(records),
+    )
 
 
 # ---- shared aggregations ----------------------------------------------------
@@ -601,6 +820,7 @@ def render_markdown(
     segments: list[Segment],
     aggs: Aggregations,
     shards: list[ShardRecord],
+    redundancy: RedundancyAnalysis | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Test suite analysis")
@@ -616,6 +836,35 @@ def render_markdown(
         f"80% in **{aggs.pareto_80:,}** ({100 * aggs.pareto_80 / len(records):.1f}%)"
     )
     lines.append("")
+
+    if redundancy is not None and (redundancy.drop_count or redundancy.near_isomorphs):
+        lines.append("## Redundancy & staleness — drop candidates")
+        lines.append("")
+        lines.append(
+            f"- **Drop list**: {redundancy.drop_count:,} tests, {_fmt_h(redundancy.total_drop_savings)} "
+            f"(isomorphs + quarantined skips + trivial coverage)"
+        )
+        if redundancy.isomorphs:
+            iso_total = sum(c.droppable_duration for c in redundancy.isomorphs)
+            lines.append(
+                f"- Isomorphs (identical coverage): {len(redundancy.isomorphs)} clusters, {_fmt_h(iso_total)} droppable"
+            )
+        if redundancy.quarantined:
+            quar_total = sum(r.duration for r in redundancy.quarantined)
+            lines.append(
+                f"- Quarantined (skipped + costs collection): {len(redundancy.quarantined)} tests, {_fmt_h(quar_total)}"
+            )
+        if redundancy.trivial:
+            triv_total = sum(r.duration for r in redundancy.trivial)
+            lines.append(
+                f"- Trivial coverage (no production files): {len(redundancy.trivial)} tests, {_fmt_h(triv_total)}"
+            )
+        if redundancy.near_isomorphs:
+            lines.append(
+                f"- Near-isomorphs (Jaccard ≥ 0.85, review): {len(redundancy.near_isomorphs)} clusters, "
+                f"{_fmt_h(redundancy.review_savings)} potential"
+            )
+        lines.append("")
 
     if shards:
         wall = sum(s.suite_time for s in shards)
@@ -749,6 +998,7 @@ details > summary { cursor: pointer; padding: 6px 0; color: var(--accent); font-
 .banner .num { font-variant-numeric: tabular-nums; font-weight: 600; }
 .banner .num.bad { color: var(--act-drop); }
 .banner .num.warn { color: var(--act-opt); }
+.banner-drop { border-left-color: var(--act-drop); }
 /* Action labels */
 .act { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 700;
        text-transform: uppercase; letter-spacing: .04em; }
@@ -777,7 +1027,6 @@ SEGMENT_ACTIONS: dict[str, tuple[str, str]] = {
     "fast_valuable": ("keep", "KEEP"),
     "fast_broad_only": ("low", "LOW PRIORITY"),
     "over_broad_tracer": ("data", "DATA NOISE"),
-    "stale_entry": ("data", "STALE"),
     "missing_coverage": ("data", "NO DATA"),
     "suspect_duration": ("data", "UNTRUSTED TIMING"),
 }
@@ -890,19 +1139,12 @@ def _exec_summary(
             f"These need a clean re-measurement before optimization claims.</p>"
         )
     missing = seg_by_name.get("missing_coverage")
-    stale = seg_by_name.get("stale_entry")
     if missing and missing.count > 0:
         gap_pct = 100 * missing.count / len(records)
         findings.append(
             f"<p class='finding'>● <strong>Coverage data gap</strong>: "
             f"<span class='num'>{missing.count:,}</span> tests ({gap_pct:.0f}% of suite) lack testmon data — "
-            f"Products turbo job didn't upload + 6 empty Core-poe1 shards. "
-            + (
-                f"<span class='num'>{stale.count:,}</span> additional entries are <em>stale</em> (test file gone)."
-                if stale and stale.count
-                else ""
-            )
-            + "</p>"
+            f"didn't run in this CI, ran in a turbo shard without upload, or stale <code>.test_durations</code> entries.</p>"
         )
     if not findings:
         return ""
@@ -919,6 +1161,134 @@ def _action_row_class(seg_name: str) -> str:
     return f"seg-{cls_short}"
 
 
+def _redundancy_banner(redundancy: RedundancyAnalysis) -> str:
+    """Headline summary of drop savings — shown above the rest of the report."""
+    if redundancy.drop_count == 0 and not redundancy.near_isomorphs:
+        return ""
+    parts = ["<div class='banner banner-drop'><h2>Redundancy &amp; staleness — drop candidates</h2>"]
+    drop_h = _fmt_h(redundancy.total_drop_savings)
+    parts.append(
+        f"<p class='finding'><strong>Drop list</strong> — "
+        f"<span class='num warn'>{redundancy.drop_count:,}</span> tests, "
+        f"<span class='num warn'>{drop_h}</span> of test-time. "
+        "High-confidence: exact-duplicate coverage, skipped-but-still-collected, or coverage of test-helpers only.</p>"
+    )
+    if redundancy.near_isomorphs:
+        cluster_count = len(redundancy.near_isomorphs)
+        member_total = sum(len(c.members) for c in redundancy.near_isomorphs)
+        parts.append(
+            f"<p class='finding'><strong>Review list</strong> — "
+            f"<span class='num'>{cluster_count}</span> near-isomorph clusters "
+            f"({member_total} tests, {_fmt_h(redundancy.review_savings)} potential) — Jaccard ≥ 0.85, "
+            "needs human review before consolidation.</p>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _redundancy_table(clusters: list[RedundancyCluster], heading: str, limit: int = 30) -> str:
+    if not clusters:
+        return ""
+    parts: list[str] = [f"<h3>{_h(heading)}</h3>"]
+    parts.append(
+        "<table><thead><tr>"
+        "<th>Cluster size</th>"
+        "<th class='num'>Mean Jaccard</th>"
+        "<th class='num'>Cov files</th>"
+        "<th class='num'>Total time</th>"
+        "<th class='num'>Droppable</th>"
+        "<th>Keep (fastest)</th>"
+        "<th>Drop candidates</th>"
+        "</tr></thead><tbody>"
+    )
+    for c in clusters[:limit]:
+        keep = c.representative
+        drops = c.members[1:]
+        drop_html = "<br>".join(
+            f"<code class='path'>{_h(m.nodeid)}</code> <span class='num'>({m.duration:.2f}s)</span>" for m in drops[:8]
+        )
+        if len(drops) > 8:
+            drop_html += f"<br><em>… {len(drops) - 8} more</em>"
+        parts.append(
+            "<tr>"
+            f"<td class='num'>{len(c.members)}</td>"
+            f"<td class='num'>{c.mean_jaccard:.2f}</td>"
+            f"<td class='num'>{c.coverage_size}</td>"
+            f"<td class='num'>{c.total_duration:.1f}s</td>"
+            f"<td class='num warn'>{c.droppable_duration:.1f}s</td>"
+            f"<td><code class='path'>{_h(keep.nodeid)}</code><br><span class='num'>{keep.duration:.2f}s</span></td>"
+            f"<td>{drop_html}</td>"
+            "</tr>"
+        )
+    if len(clusters) > limit:
+        parts.append(f"<tr><td colspan='7'><em>… {len(clusters) - limit} more clusters</em></td></tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _staleness_table(records: list[TestRecord], heading: str, kind: str, limit: int = 30) -> str:
+    if not records:
+        return ""
+    parts: list[str] = [f"<h3>{_h(heading)}</h3>"]
+    parts.append(
+        "<table><thead><tr>"
+        "<th>Test</th>"
+        "<th class='num'>Duration</th>"
+        f"<th>{'Status' if kind == 'quarantined' else 'Covered files'}</th>"
+        "</tr></thead><tbody>"
+    )
+    for r in records[:limit]:
+        third = _status_badge(r.status) if kind == "quarantined" else str(len(r.coverage_files))
+        parts.append(
+            "<tr>"
+            f"<td><code class='path'>{_h(r.nodeid)}</code></td>"
+            f"<td class='num'>{r.duration:.2f}s</td>"
+            f"<td class='num'>{third}</td>"
+            "</tr>"
+        )
+    if len(records) > limit:
+        parts.append(f"<tr><td colspan='3'><em>… {len(records) - limit} more</em></td></tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _redundancy_section(redundancy: RedundancyAnalysis) -> str:
+    if redundancy.drop_count == 0 and not redundancy.near_isomorphs:
+        return ""
+    parts: list[str] = ["<h2>Drop &amp; review lists</h2>"]
+    if redundancy.isomorphs:
+        parts.append(
+            _redundancy_table(
+                redundancy.isomorphs,
+                f"Isomorphs — identical coverage ({len(redundancy.isomorphs)} clusters, {_fmt_h(sum(c.droppable_duration for c in redundancy.isomorphs))} droppable)",
+            )
+        )
+    if redundancy.quarantined:
+        parts.append(
+            _staleness_table(
+                redundancy.quarantined,
+                f"Quarantined — skipped tests still costing collection ({len(redundancy.quarantined)} tests, {_fmt_h(sum(r.duration for r in redundancy.quarantined))})",
+                kind="quarantined",
+            )
+        )
+    if redundancy.trivial:
+        parts.append(
+            _staleness_table(
+                redundancy.trivial,
+                f"Trivial coverage — only test-helpers, no production code ({len(redundancy.trivial)} tests, {_fmt_h(sum(r.duration for r in redundancy.trivial))})",
+                kind="trivial",
+            )
+        )
+    if redundancy.near_isomorphs:
+        parts.append(
+            _redundancy_table(
+                redundancy.near_isomorphs,
+                f"Near-isomorphs — Jaccard ≥ 0.85 ({len(redundancy.near_isomorphs)} clusters, {_fmt_h(redundancy.review_savings)} potential — human review)",
+            )
+        )
+    return "".join(parts)
+
+
 def _parametrization_cluster(members: list[TestRecord]) -> list[tuple[str, list[TestRecord]]]:
     """Group test records by their parametrization base name."""
     by_base: dict[str, list[TestRecord]] = defaultdict(list)
@@ -932,6 +1302,7 @@ def render_html(
     segments: list[Segment],
     aggs: Aggregations,
     shards: list[ShardRecord],
+    redundancy: RedundancyAnalysis | None = None,
 ) -> str:
     total = aggs.total_time
     parts: list[str] = []
@@ -948,6 +1319,10 @@ def render_html(
 
     # Executive summary up front.
     parts.append(_exec_summary(records, segments, shards))
+
+    # Redundancy & staleness headline — shows drop savings before anything else.
+    if redundancy is not None:
+        parts.append(_redundancy_banner(redundancy))
 
     # Headline cards.
     cards = [
@@ -1031,6 +1406,10 @@ def render_html(
                 f"<td class='num'>{sh.skip_count}</td></tr>"
             )
         parts.append("</tbody></table>")
+
+    # Drop & review lists (redundancy + staleness) — actionable.
+    if redundancy is not None:
+        parts.append(_redundancy_section(redundancy))
 
     # Archetype segments (color-coded with action labels).
     parts.append("<h2>Archetype segments</h2>")
@@ -1291,7 +1670,9 @@ def render_html(
         "<dl>"
         "<dt>Duration source</dt>"
         "<dd><code>.test_durations</code> (pytest-split): smoothed averages across master runs, clamped to a 10ms floor; "
-        "flat 60.0/18.0 entries are <em>defaults</em> (newly added tests, flaky reruns), not real timings — bucketed as <em>untrusted timing</em>.</dd>"
+        "flat 60.0/18.0 entries are <em>defaults</em> (newly added tests, flaky reruns), not real timings — bucketed as <em>untrusted timing</em>. "
+        "Per-test junit timings from this run are more accurate but only cover tests that actually ran; "
+        "<code>.test_durations</code> includes everything pytest-split has ever balanced for. Treat the duration figures here as historical averages, not single-run truth.</dd>"
         "<dt>Coverage source</dt>"
         "<dd>pytest-testmon (<code>.testmondata</code>): per-shard SQLite recording which source files each test imported during execution. "
         "File-level, not line-level. Merged across 46 shards. Files in <code>tools/testmon_high_fanout_files.txt</code> "
@@ -1361,10 +1742,11 @@ def main() -> int:
     else:
         segments = segment_records(records)
     aggs = compute_aggregations(records, test_files=test_files or None)
+    redundancy = analyze_redundancy(records)
 
     fmt = "html" if (args.out and args.out.suffix.lower() in {".html", ".htm"}) else "md"
     render = render_html if fmt == "html" else render_markdown
-    report = render(records, segments, aggs, shards)
+    report = render(records, segments, aggs, shards, redundancy)
 
     if args.out:
         args.out.write_text(report)
