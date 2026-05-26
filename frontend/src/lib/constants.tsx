@@ -387,6 +387,7 @@ export const FEATURE_FLAGS = {
     ONBOARDING_MOBILE_INSTALL_HELPER: 'onboarding-mobile-install-helper', // owner: @fercgomes #team-growth multivariate=control,test — target $device_type=Mobile at the flag level
     ONBOARDING_NAVBAR: 'onboarding-navbar', // owner: #team-growth, hides the navbar during onboarding to reduce distractions multivariate=true
     ONBOARDING_PRODUCT_SELECTION_HEADING: 'onboarding-product-selection-heading', // owner: #team-growth, payload overrides the heading copy on the first onboarding page
+    ONBOARDING_PRODUCT_TREE: 'onboarding-product-tree', // owner: #team-growth, replaces the /onboarding scene with a quest-shaped product discovery tree
     ONBOARDING_SESSION_REPLAY_MEDIA: 'onboarding-session-replay-media', // owner: @fercgomes #team-growth multivariate=control,screenshot,demo
     ONBOARDING_SIMPLIFIED_PRODUCT_SELECTION: 'onboarding-simplified-product-selection', // owner: @fercgomes #team-growth multivariate=control,test — DEPRECATED: use PRODUCT_SELECTION_SCREEN_VARIANT
     ONBOARDING_SKIP_INSTALL_STEP: 'onboarding-skip-install-step', // owner: @rafaeelaudibert #team-growth multivariate=true

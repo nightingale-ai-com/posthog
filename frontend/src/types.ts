@@ -799,6 +799,8 @@ export interface ProductIntentType {
     product_type: string
     created_at: string
     onboarding_completed_at?: string
+    activated_at?: string
+    updated_at?: string
 }
 
 // This type would be more correct without `Partial<TeamType>`, but it's only used in the shared dashboard/insight

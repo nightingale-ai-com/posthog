@@ -391,7 +391,7 @@ def _team_product_intents_cache_key(team_id: int) -> str:
 def _fetch_product_intents(team_id: int) -> list[dict[str, Any]]:
     return list(
         ProductIntent.objects.filter(team_id=team_id).values(
-            "product_type", "created_at", "onboarding_completed_at", "updated_at"
+            "product_type", "created_at", "onboarding_completed_at", "activated_at", "updated_at"
         )
     )
 
