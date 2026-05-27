@@ -16,9 +16,8 @@ export function ProductSelection(): JSX.Element {
     // teams (no product intents) still hit the picker variants below because the
     // tree has no trunk to root at.
     const { isFreshTeam } = useValues(productTreeLogic)
-    const treeEnabled = !!featureFlags[FEATURE_FLAGS.ONBOARDING_PRODUCT_TREE] && !isFreshTeam
-
-    if (treeEnabled) {
+    const treeEnabled = !!featureFlags[FEATURE_FLAGS.ONBOARDING_PRODUCT_TREE]
+    if (treeEnabled && !isFreshTeam) {
         return <ProductTree />
     }
 
