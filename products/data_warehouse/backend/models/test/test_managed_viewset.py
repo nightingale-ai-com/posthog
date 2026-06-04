@@ -13,6 +13,7 @@ from posthog.temporal.data_imports.sources.stripe.constants import (
     SUBSCRIPTION_RESOURCE_NAME as STRIPE_SUBSCRIPTION_RESOURCE_NAME,
 )
 
+from products.data_modeling.backend.models import DAG, REVENUE_ANALYTICS_DAG_NAME, Node
 from products.data_modeling.backend.models.datawarehouse_managed_viewset import DataWarehouseManagedViewSet
 from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
 from products.data_warehouse.backend.types import DataWarehouseManagedViewSetKind, ExternalDataSourceType
@@ -135,6 +136,30 @@ class TestDataWarehouseManagedViewSetModel(BaseTest):
         self.assertNotEqual(saved_query.columns, old_columns)
         self.assertIsNotNone(saved_query.external_tables)  # Was unset, guarantee we've set it
         self.assertIn("HogQLQuery", saved_query.query.get("kind", ""))  # type: ignore
+
+    def test_sync_views_places_views_in_revenue_analytics_dag(self):
+        managed_viewset = DataWarehouseManagedViewSet.objects.create(
+            team=self.team,
+            kind=DataWarehouseManagedViewSetKind.REVENUE_ANALYTICS,
+        )
+        managed_viewset.sync_views()
+
+        ra_dag = DAG.objects.filter(team=self.team, name=REVENUE_ANALYTICS_DAG_NAME).first()
+        self.assertIsNotNone(ra_dag)
+
+        views = DataWarehouseSavedQuery.objects.filter(team=self.team, managed_viewset=managed_viewset).exclude(
+            deleted=True
+        )
+        node_sq_ids = set(
+            Node.objects.filter(team=self.team, dag=ra_dag, saved_query__isnull=False).values_list(
+                "saved_query_id", flat=True
+            )
+        )
+        # every managed view is represented by a node in the Revenue Analytics DAG, and nowhere else
+        for view in views:
+            self.assertIn(view.id, node_sq_ids)
+            other_dag_nodes = Node.objects.filter(team=self.team, saved_query=view).exclude(dag=ra_dag)
+            self.assertFalse(other_dag_nodes.exists())
 
     def test_delete_with_views(self):
         """Test that delete_with_views properly deletes the managed viewset and marks views as deleted"""
