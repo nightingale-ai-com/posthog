@@ -12,7 +12,7 @@ import {
 } from '../cdp/hog-transformations/hog-transformer.service'
 import { EncryptedFields } from '../cdp/utils/encryption-utils'
 import { CommonConfig } from '../common/config'
-import { defaultConfig, overrideConfigWithEnv } from '../config/config'
+import { buildIntegerMatcher, defaultConfig, overrideConfigWithEnv } from '../config/config'
 import { createCookielessRedisConnectionConfig, createIngestionRedisConnectionConfig } from '../config/redis-pools'
 import {
     JoinedIngestionPipelineConfig,
@@ -344,6 +344,10 @@ export class IngestionApiServer implements NodeServer {
                 PERSON_MERGE_SYNC_BATCH_SIZE: this.config.PERSON_MERGE_SYNC_BATCH_SIZE,
                 PERSON_JSONB_SIZE_ESTIMATE_ENABLE: this.config.PERSON_JSONB_SIZE_ESTIMATE_ENABLE,
                 PERSON_PROPERTIES_UPDATE_ALL: this.config.PERSON_PROPERTIES_UPDATE_ALL,
+                stripFeatureFlagCalledExcludedTeams: buildIntegerMatcher(
+                    this.config.STRIP_FEATURE_FLAG_CALLED_PROPERTIES_EXCLUDED_TEAMS,
+                    true
+                ),
             },
             concurrentBatches: this.config.INGESTION_WORKER_CONCURRENT_BATCHES,
         }

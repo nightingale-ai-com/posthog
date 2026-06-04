@@ -8,6 +8,7 @@ import { createTeam, getFirstTeam, getTeam, resetTestDatabase } from '~/tests/he
 
 import { Hub, PipelineEvent, Team } from '../../src/types'
 import { closeHub, createHub } from '../../src/utils/db/hub'
+import { parseJSON } from '../utils/json-parse'
 import { UUIDT } from '../utils/utils'
 import { IngestionTestingConsumer } from './ingestion-testing-consumer'
 
@@ -431,6 +432,56 @@ describe('IngestionTestingConsumer', () => {
                 (m) => m.topic === 'clickhouse_person_test' || m.topic === 'clickhouse_person_distinct_id2_test'
             )
             expect(personMessages).toHaveLength(0)
+        })
+    })
+
+    describe('$feature_flag_called property stripping', () => {
+        const mixedProperties = {
+            $feature_flag: 'my-flag',
+            '$feature/my-flag': 'variant-a',
+            $lib: 'posthog-python',
+            $active_feature_flags: ['flag-a'],
+            environment: 'production',
+            my_custom_prop: 'leaked',
+        }
+
+        const ffCalledProperties = (): Record<string, any> | undefined => {
+            const messages = mockProducerObserver.getProducedKafkaMessagesForTopic('clickhouse_events_json_test')
+            const message = messages.find((m) => (m.value as any).event === '$feature_flag_called')
+            return message ? parseJSON((message.value as any).properties) : undefined
+        }
+
+        // Testing mode must honor STRIP_FEATURE_FLAG_CALLED_PROPERTIES_EXCLUDED_TEAMS the
+        // same way production ingestion does, rather than stripping every team unconditionally.
+        it.each([
+            { name: 'kill switch (default *) keeps all properties', excluded: () => '*', shouldStrip: false },
+            { name: 'per-team exclusion keeps all properties', excluded: () => String(team.id), shouldStrip: false },
+            { name: 'empty exclusion strips non-whitelisted properties', excluded: () => '', shouldStrip: true },
+        ])('$name', async ({ excluded, shouldStrip }) => {
+            hub.STRIP_FEATURE_FLAG_CALLED_PROPERTIES_EXCLUDED_TEAMS = excluded()
+            ingester = await createIngestionTestingConsumer(hub)
+
+            await ingester.handleKafkaBatch(
+                createKafkaMessages([createEvent({ event: '$feature_flag_called', properties: mixedProperties })])
+            )
+
+            const properties = ffCalledProperties()
+            expect(properties).toMatchObject({
+                $feature_flag: 'my-flag',
+                '$feature/my-flag': 'variant-a',
+                $lib: 'posthog-python',
+                // Whitelisted: survives in every mode (CDP destinations map it).
+                $active_feature_flags: ['flag-a'],
+            })
+            if (shouldStrip) {
+                expect(properties).not.toHaveProperty('environment')
+                expect(properties).not.toHaveProperty('my_custom_prop')
+            } else {
+                expect(properties).toMatchObject({
+                    environment: 'production',
+                    my_custom_prop: 'leaked',
+                })
+            }
         })
     })
 })

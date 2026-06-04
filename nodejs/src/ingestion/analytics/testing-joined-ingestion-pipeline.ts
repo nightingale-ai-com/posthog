@@ -1,6 +1,6 @@
 import { Message } from 'node-rdkafka'
 
-import { Team } from '../../types'
+import { Team, ValueMatcher } from '../../types'
 import { PromiseScheduler } from '../../utils/promise-scheduler'
 import { TeamManager } from '../../utils/team-manager'
 import { DlqOutput, IngestionWarningsOutput } from '../common/outputs'
@@ -24,6 +24,7 @@ import { createTestingPreTeamPreprocessingSubpipeline } from './testing-pre-team
 export interface TestingJoinedIngestionPipelineConfig {
     groupId: string
     outputs: IngestionOutputs<EventOutput | HeatmapsOutput | IngestionWarningsOutput | DlqOutput>
+    stripFeatureFlagCalledExcludedTeams: ValueMatcher<number>
 }
 
 export interface TestingJoinedIngestionPipelineDeps {
@@ -82,7 +83,7 @@ export function createTestingJoinedIngestionPipeline<
     config: TestingJoinedIngestionPipelineConfig,
     deps: TestingJoinedIngestionPipelineDeps
 ) {
-    const { groupId, outputs } = config
+    const { groupId, outputs, stripFeatureFlagCalledExcludedTeams } = config
 
     const { promiseScheduler } = deps
 
@@ -94,6 +95,7 @@ export function createTestingJoinedIngestionPipeline<
     const perEventConfig: TestingPerDistinctIdPipelineConfig = {
         outputs,
         groupId,
+        stripFeatureFlagCalledExcludedTeams,
     }
 
     // Compared to joined-ingestion-pipeline.ts:

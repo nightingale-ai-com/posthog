@@ -161,6 +161,8 @@ export type IngestionConsumerConfig = {
     SKIP_UPDATE_EVENT_AND_PROPERTIES_STEP: boolean
     EVENT_SCHEMA_ENFORCEMENT_ENABLED: boolean
     KAFKA_BATCH_START_LOGGING_ENABLED: boolean
+    /** Teams opted out of `$feature_flag_called` property stripping: '*' to disable globally, or comma-separated team IDs. Empty strips every team. */
+    STRIP_FEATURE_FLAG_CALLED_PROPERTIES_EXCLUDED_TEAMS: string
 
     // AI event splitting config
     INGESTION_AI_EVENT_SPLITTING_ENABLED: boolean
@@ -272,6 +274,9 @@ export function getDefaultIngestionConsumerConfig(): IngestionConsumerConfig {
         SKIP_UPDATE_EVENT_AND_PROPERTIES_STEP: false,
         EVENT_SCHEMA_ENFORCEMENT_ENABLED: true,
         KAFKA_BATCH_START_LOGGING_ENABLED: false,
+        // '*' disables stripping for everyone; the charts repo enables it by setting this
+        // to '' (all teams) or a comma-separated team list (all teams except those).
+        STRIP_FEATURE_FLAG_CALLED_PROPERTIES_EXCLUDED_TEAMS: '*',
 
         // AI event splitting config
         INGESTION_AI_EVENT_SPLITTING_ENABLED: false,

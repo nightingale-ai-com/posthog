@@ -2,7 +2,7 @@ import { Message } from 'node-rdkafka'
 
 import { PluginEvent } from '~/plugin-scaffold'
 
-import { EventHeaders, Team } from '../../types'
+import { EventHeaders, Team, ValueMatcher } from '../../types'
 import { IngestionWarningsOutput } from '../common/outputs'
 import { createCreateEventStep } from '../event-processing/create-event-step'
 import { createDisablePersonProcessingWithFakePersonStep } from '../event-processing/disable-person-processing-with-fake-person-step'
@@ -24,13 +24,14 @@ export interface TestingEventSubpipelineInput {
 export interface TestingEventSubpipelineConfig {
     outputs: IngestionOutputs<EventOutput | HeatmapsOutput | IngestionWarningsOutput>
     groupId: string
+    stripFeatureFlagCalledExcludedTeams: ValueMatcher<number>
 }
 
 export function createTestingEventSubpipeline<TInput extends TestingEventSubpipelineInput, TContext>(
     builder: StartPipelineBuilder<TInput, TContext>,
     config: TestingEventSubpipelineConfig
 ): PipelineBuilder<TInput, void, TContext> {
-    const { outputs, groupId } = config
+    const { outputs, groupId, stripFeatureFlagCalledExcludedTeams } = config
 
     // Compared to event-subpipeline.ts:
     // CHANGED: createNormalizeProcessPersonFlagStep → createDisablePersonProcessingWithFakePersonStep
@@ -43,7 +44,7 @@ export function createTestingEventSubpipeline<TInput extends TestingEventSubpipe
     return builder
         .pipe(createDisablePersonProcessingWithFakePersonStep())
         .pipe(createNormalizeEventStep())
-        .pipe(createPrepareEventStep())
+        .pipe(createPrepareEventStep(stripFeatureFlagCalledExcludedTeams))
         .pipe(createExtractHeatmapDataStep(outputs))
         .pipe(createCreateEventStep(EVENTS_OUTPUT))
         .pipe(

@@ -2,6 +2,7 @@ import { Message } from 'node-rdkafka'
 
 import { instrumentFn } from '~/common/tracing/tracing-utils'
 
+import { buildIntegerMatcher } from '../config/config'
 import { KAFKA_INGESTION_WARNINGS } from '../config/kafka-topics'
 import { KafkaConsumerInterface, createKafkaConsumer } from '../kafka/consumer'
 import { KafkaProducerWrapper } from '../kafka/producer'
@@ -34,6 +35,7 @@ export type IngestionTestingConsumerFullConfig = Pick<
     | 'CLICKHOUSE_JSON_EVENTS_KAFKA_TOPIC'
     | 'CLICKHOUSE_HEATMAPS_KAFKA_TOPIC'
     | 'KAFKA_BATCH_START_LOGGING_ENABLED'
+    | 'STRIP_FEATURE_FLAG_CALLED_PROPERTIES_EXCLUDED_TEAMS'
 >
 
 export interface IngestionTestingConsumerDeps {
@@ -118,6 +120,10 @@ export class IngestionTestingConsumer {
         const joinedPipelineConfig: TestingJoinedIngestionPipelineConfig = {
             groupId: this.groupId,
             outputs,
+            stripFeatureFlagCalledExcludedTeams: buildIntegerMatcher(
+                this.config.STRIP_FEATURE_FLAG_CALLED_PROPERTIES_EXCLUDED_TEAMS,
+                true
+            ),
         }
         const joinedPipelineDeps: TestingJoinedIngestionPipelineDeps = {
             promiseScheduler: this.promiseScheduler,

@@ -110,7 +110,7 @@ export function createAiEventSubpipeline<TInput extends AiEventSubpipelineInput,
                 })),
             ])
         )
-        .pipe(createPrepareEventStep())
+        .pipe(createPrepareEventStep(options.stripFeatureFlagCalledExcludedTeams))
         .pipe(createProcessGroupsStep(teamManager, groupTypeManager, groupStore, options))
         .pipe(createCreateEventStep(EVENTS_OUTPUT))
         .pipe(createSplitAiEventsStep(splitAiEventsConfig))
