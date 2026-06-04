@@ -38,8 +38,10 @@ from posthog.schema import (
 )
 
 from posthog.hogql.constants import LimitContext
+from posthog.hogql.errors import QueryError, ResolutionError
 
 from posthog.clickhouse.client.limit import ConcurrencyLimitExceeded
+from posthog.errors import ExposedCHQueryError
 from posthog.hogql_queries.insights.trends.trends_query_runner import TrendsQueryRunner
 from posthog.hogql_queries.query_runner import (
     ExecutionMode,
@@ -623,6 +625,35 @@ class TestQueryRunner(BaseTest):
         completed_kwargs = mock_emit_slo_completed.call_args.kwargs
         assert completed_kwargs["properties"].outcome == expected_outcome
         assert completed_kwargs["extra_properties"]["error_category"] == expected_error_category
+
+    @parameterized.expand(
+        [
+            ("exposed_hogql_error", lambda: QueryError("Unknown table `ae_event_people`."), False),
+            ("exposed_ch_query_error", lambda: ExposedCHQueryError("Unknown table"), False),
+            ("internal_hogql_error", lambda: ResolutionError("Unknown table: ae_event_people"), True),
+            ("unclassified_value_error", lambda: ValueError("boom"), True),
+        ]
+    )
+    def test_run_skips_error_tracking_capture_for_user_facing_query_errors(
+        self, _name, exception_factory, expected_captured
+    ):
+        TestQueryRunner = self.setup_test_query_runner_class()
+        raised_exc = exception_factory()
+
+        def calculate_raises(self):
+            raise raised_exc
+
+        TestQueryRunner.calculate = calculate_raises
+        runner = TestQueryRunner(query={"some_attr": "bla"}, team=self.team)
+
+        with mock.patch("posthog.hogql_queries.query_runner.posthoganalytics.capture_exception") as mock_capture:
+            with pytest.raises(type(raised_exc)):
+                runner.run(execution_mode=ExecutionMode.CALCULATE_BLOCKING_ALWAYS)
+
+        if expected_captured:
+            mock_capture.assert_called_once_with(raised_exc)
+        else:
+            mock_capture.assert_not_called()
 
     def test_query_execution_metrics_not_recorded_on_cache_hit(self):
         from posthog.clickhouse.query_tagging import reset_query_tags

@@ -75,6 +75,7 @@ from posthog.hogql import ast
 from posthog.hogql.constants import LimitContext
 from posthog.hogql.context import HogQLContext
 from posthog.hogql.database.database import Database
+from posthog.hogql.errors import ExposedHogQLError
 from posthog.hogql.modifiers import create_default_modifiers_for_user
 from posthog.hogql.printer import prepare_and_print_ast
 from posthog.hogql.query import create_default_modifiers_for_team
@@ -93,7 +94,7 @@ from posthog.clickhouse.client.limit import (
     get_org_app_concurrency_limit,
 )
 from posthog.clickhouse.query_tagging import get_query_tag_value, tag_queries
-from posthog.errors import QueryErrorCategory, classify_query_error, clickhouse_error_type
+from posthog.errors import ExposedCHQueryError, QueryErrorCategory, classify_query_error, clickhouse_error_type
 from posthog.event_usage import AnalyticsProps, groups, report_user_or_team_action
 from posthog.exceptions_capture import capture_exception
 from posthog.hogql_queries.insights.utils.breakdowns import has_multi_breakdown, has_single_breakdown
@@ -229,6 +230,18 @@ def _is_force_blocking_eligible_for_shared(last_refresh: datetime | None) -> boo
     if last_refresh is None:
         return False
     return datetime.now(UTC) - last_refresh >= SHARED_FORCE_BLOCKING_MIN_AGE
+
+
+def _is_user_facing_query_error(exc: BaseException) -> bool:
+    """Whether an exception is an expected user-facing query error rather than a server fault.
+
+    ExposedHogQLError (e.g. QueryError for an unknown table, SyntaxError) and ExposedCHQueryError
+    are the classes explicitly flagged user-safe; the API layer downgrades them to HTTP 400. They
+    are validation feedback on user input, not platform failures, so they should not be captured as
+    server exceptions in error tracking. InternalHogQLError and unclassified exceptions still get
+    captured so genuine faults stay visible.
+    """
+    return isinstance(exc, ExposedHogQLError | ExposedCHQueryError)
 
 
 def _classify_error_for_slo(exc: Exception) -> tuple[QueryErrorCategory, SloOutcome]:
@@ -1454,7 +1467,10 @@ class QueryRunner(ABC, Generic[Q, R, CR]):
         self.query_id = query_id or self.query_id
         self._cache_age_override = cache_age_seconds
 
-        with posthoganalytics.new_context():
+        # capture_exceptions is disabled here so we can filter what reaches error tracking in the
+        # except block below — the context's auto-capture would otherwise record expected
+        # user-facing query errors (e.g. unknown table) that the API downgrades to a 400.
+        with posthoganalytics.new_context(capture_exceptions=False):
             query_type = getattr(self.query, "kind", "Other")
             distinct_id = str(user.distinct_id) if user else str(self.team.uuid)
 
@@ -1633,6 +1649,10 @@ class QueryRunner(ABC, Generic[Q, R, CR]):
                         slo.succeed(error_category=category.value)
                     else:
                         slo.fail(error_category=category.value)
+                    # Mirror the context's auto-capture (disabled above), but skip expected
+                    # user-facing query errors so they don't drown genuine faults in error tracking.
+                    if not _is_user_facing_query_error(exc):
+                        posthoganalytics.capture_exception(exc)
                     raise
 
     def _execute_and_cache_blocking(
