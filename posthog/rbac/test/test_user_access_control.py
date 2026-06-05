@@ -1946,11 +1946,11 @@ class TestUnifiedAccessControlPreload(BaseUserAccessControlTest):
     def test_can_serve_from_preload_guard(self):
         uac = self._fresh_uac()
         assert uac._can_serve_from_preload({"team_id": self.team.id, "resource": "notebook"}) is True
+        # Project queryset filter is org-scoped (no team_id) -> falls through to a targeted query.
         assert (
-            uac._can_serve_from_preload({"team__organization_id": str(self.organization.id), "resource": "plugin"})
+            uac._can_serve_from_preload({"team__organization_id": str(self.organization.id), "resource": "project"})
             is False
         )
-        # Project queryset filter is org-scoped (no team_id) -> falls through to a targeted query.
         assert uac._can_serve_from_preload({"resource": "project", "resource_id__isnull": False}) is False
 
     def test_blocked_resource_ids_by_scope_parity_with_filter_queryset(self):
