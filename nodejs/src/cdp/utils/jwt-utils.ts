@@ -2,13 +2,19 @@ import jwt from 'jsonwebtoken'
 
 export enum PosthogJwtAudience {
     SUBSCRIPTION_PREFERENCES = 'posthog:messaging:subscription_preferences',
+    RECORDING_API = 'posthog:recording_api',
+}
+
+/** Split a comma-separated key string into usable keys (newest first), dropping empty segments. */
+export function parseJwtKeys(commaSeparatedSaltKeys: string): string[] {
+    return commaSeparatedSaltKeys.split(',').filter((key) => key)
 }
 
 export class JWT {
     private secrets: string[] = []
 
     constructor(commaSeparatedSaltKeys: string) {
-        const saltKeys = commaSeparatedSaltKeys.split(',').filter((key) => key)
+        const saltKeys = parseJwtKeys(commaSeparatedSaltKeys)
         if (!saltKeys.length) {
             throw new Error('Encryption keys are not set')
         }

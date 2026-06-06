@@ -1,9 +1,12 @@
+from datetime import timedelta
+
 from django.conf import settings
 from django.db import close_old_connections, transaction
 
 import structlog
 from temporalio import activity
 
+from posthog.session_recordings.recordings.recording_api_jwt import mint_recording_api_token, recording_api_jwt_enabled
 from posthog.storage import object_storage
 
 from products.exports.backend.models.exported_asset import ExportedAsset
@@ -18,6 +21,12 @@ from ..types import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# The rasterizer relays one token across an entire render and cannot re-mint, so it must outlive the
+# whole Node activity envelope: maximum_attempts=2 × start_to_close_timeout=30min plus queue/backoff.
+# A generous 3h lifetime guarantees retries never hit an expired token. This is still a read-only,
+# single-team token (a big improvement over the unscoped shared secret it replaces).
+_RASTERIZE_TOKEN_TTL = timedelta(hours=3)
 
 _RENDER_FINGERPRINT_KEY = "render_fingerprint"
 _PERSISTED_OUTPUT_FIELDS: frozenset[str] = frozenset(
@@ -59,9 +68,16 @@ def build_rasterization_input(exported_asset_id: int) -> BuildRasterizationResul
     default_speed = 1 if (duration is not None and duration <= 5) else 4
     playback_speed = ctx.get("playback_speed", default_speed)
 
+    # Empty until the signing secret is configured; the rasterizer then relays the legacy shared
+    # secret instead, so rollout can happen per environment without breaking rendering.
+    recording_api_token = (
+        mint_recording_api_token(asset.team_id, "read", ttl=_RASTERIZE_TOKEN_TTL) if recording_api_jwt_enabled() else ""
+    )
+
     activity_input = RasterizationActivityInput(
         team_id=asset.team_id,
         session_id=session_id,
+        recording_api_token=recording_api_token,
         s3_bucket=settings.OBJECT_STORAGE_BUCKET,
         s3_key_prefix=s3_key_prefix,
         playback_speed=playback_speed,

@@ -23,6 +23,7 @@ import { SessionMetadataStore } from '../shared/metadata/session-metadata-store'
 import { ReplayEventsOutput, SessionFeaturesOutput } from '../shared/outputs'
 import { RetentionService } from '../shared/retention/retention-service'
 import { TeamService } from '../shared/teams/team-service'
+import { createRecordingApiAuthMiddleware } from './auth'
 import { RecordingService } from './recording-service'
 import { DeleteRecordingsBodySchema, GetBlockQuerySchema, RecordingParamsSchema, TeamParamsSchema } from './schemas'
 import { KeyStore, RecordingApiConfig, RecordingDecryptor } from './types'
@@ -195,9 +196,18 @@ export class RecordingApi {
 
         const blocksPath = '/api/projects/:team_id/recordings/:session_id/blocks'
 
-        router.get(blockPath, asyncHandler(this.getBlock))
-        router.get(blocksPath, asyncHandler(this.listBlocks))
-        router.post('/api/projects/:team_id/recordings/delete', asyncHandler(this.deleteRecordings))
+        const auth = (op: 'read' | 'delete') =>
+            createRecordingApiAuthMiddleware({
+                jwtSecret: this.config.RECORDING_API_JWT_SECRET,
+                legacySecret: this.config.INTERNAL_API_SECRET,
+                allowLegacySecret: this.config.RECORDING_API_ALLOW_LEGACY_SECRET,
+                op,
+            })
+        const readAuth = auth('read')
+
+        router.get(blockPath, readAuth, asyncHandler(this.getBlock))
+        router.get(blocksPath, readAuth, asyncHandler(this.listBlocks))
+        router.post('/api/projects/:team_id/recordings/delete', auth('delete'), asyncHandler(this.deleteRecordings))
 
         return router
     }

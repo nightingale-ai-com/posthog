@@ -19,6 +19,8 @@ class RasterizationActivityInput(BaseModel, frozen=True):
 
     session_id: str
     team_id: int
+    # Team-scoped read token the rasterizer relays to recording-api (it cannot mint its own).
+    recording_api_token: str
     s3_bucket: str
     s3_key_prefix: str
     playback_speed: float = 4
@@ -73,7 +75,8 @@ class FinalizeRasterizationInput(BaseModel, frozen=True):
 
 
 # Output destination fields — excluded so bucket/prefix changes don't invalidate caches.
-_FINGERPRINT_EXCLUDE: set[str] = {"team_id", "session_id", "s3_bucket", "s3_key_prefix"}
+# recording_api_token is per-run and ephemeral, so it must never participate in the cache key.
+_FINGERPRINT_EXCLUDE: set[str] = {"team_id", "session_id", "s3_bucket", "s3_key_prefix", "recording_api_token"}
 
 
 def compute_params_fingerprint(activity_input: "RasterizationActivityInput") -> str:

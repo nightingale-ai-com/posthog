@@ -4,7 +4,7 @@ import * as schedule from 'node-schedule'
 import { Counter } from 'prom-client'
 import express from 'ultimate-express'
 
-import { setupCommonRoutes, setupExpressApp } from '../api/router'
+import { SetupExpressAppOptions, setupCommonRoutes, setupExpressApp } from '../api/router'
 import { KafkaProducerWrapper } from '../kafka/producer'
 import { onShutdown } from '../lifecycle'
 import { PluginServerService, RedisPool } from '../types'
@@ -67,8 +67,11 @@ export class ServerLifecycle {
     private podTerminationTimer?: NodeJS.Timeout
     private processListeners: Map<string, (...args: any[]) => void> = new Map()
 
-    constructor(private config: BaseServerConfig) {
-        this.expressApp = setupExpressApp({ internalApiSecret: this.config.INTERNAL_API_SECRET })
+    constructor(
+        private config: BaseServerConfig,
+        expressAppOptions: Omit<SetupExpressAppOptions, 'internalApiSecret'> = {}
+    ) {
+        this.expressApp = setupExpressApp({ internalApiSecret: this.config.INTERNAL_API_SECRET, ...expressAppOptions })
         this.nodeInstrumentation = new NodeInstrumentation(this.config.INSTRUMENT_THREAD_PERFORMANCE)
         configureEventLoopYield(this.config.EVENT_LOOP_YIELD_THRESHOLD_MS)
         this.setupContinuousProfiling()

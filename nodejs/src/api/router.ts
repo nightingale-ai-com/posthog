@@ -24,6 +24,9 @@ export function initializePrometheusLabels(ingestionPipeline: string | null, ing
 
 export interface SetupExpressAppOptions {
     internalApiSecret?: string
+    // Path prefixes exempt from the shared-secret middleware. Used by servers that own auth on
+    // those routes themselves (e.g. recording-api verifies a team-scoped JWT per route instead).
+    internalApiAuthExcludedPathPrefixes?: string[]
 }
 
 export function setupCommonRoutes(
@@ -49,7 +52,12 @@ export function setupExpressApp(options: SetupExpressAppOptions = {}): express.A
 
     // Add internal API authentication middleware for defense-in-depth.
     // Primary protection comes from Contour routing at the infra level.
-    app.use(createInternalApiAuthMiddleware({ secret: options.internalApiSecret || '' }))
+    app.use(
+        createInternalApiAuthMiddleware({
+            secret: options.internalApiSecret || '',
+            excludedPathPrefixes: options.internalApiAuthExcludedPathPrefixes,
+        })
+    )
 
     app.use(
         express.json({
