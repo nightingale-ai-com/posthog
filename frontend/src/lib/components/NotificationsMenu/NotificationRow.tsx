@@ -45,6 +45,10 @@ export const REALTIME_NOTIFICATION_TYPE_META: Record<string, { label: string; de
         label: 'Projects created',
         description: 'When a member creates a new project in your organization',
     },
+    pulse_digest: {
+        label: 'Pulse digests',
+        description: 'When Max surfaces a notable change in your product metrics',
+    },
 }
 
 export function NotificationRow({

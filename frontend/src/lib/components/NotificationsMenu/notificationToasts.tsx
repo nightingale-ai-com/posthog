@@ -4,6 +4,7 @@ import {
     IconComment,
     IconFlask,
     IconFolder,
+    IconGraph,
     IconNotification,
     IconPlug,
     IconWarning,
@@ -23,6 +24,7 @@ const NOTIFICATION_TYPE_ICONS: Record<string, JSX.Element> = {
     issue_assigned: <IconBug className="size-5 text-primary shrink-0" />,
     experiment_concluded: <IconFlask className="size-5 text-primary shrink-0" />,
     project_created: <IconFolder className="size-5 text-primary shrink-0" />,
+    pulse_digest: <IconGraph className="size-5 text-primary shrink-0" />,
 }
 
 export function getNotificationIcon(notificationType: string): JSX.Element {

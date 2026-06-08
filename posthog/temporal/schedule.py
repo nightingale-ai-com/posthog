@@ -86,6 +86,8 @@ from products.error_tracking.backend.temporal.symbol_set_cleanup.schedule import
     create_error_tracking_symbol_set_cleanup_schedule,
 )
 from products.exports.backend.temporal.subscriptions.types import ScheduleAllSubscriptionsWorkflowInputs
+from products.pulse.backend.models import PulseSubscriptionFrequency
+from products.pulse.backend.temporal.dispatcher import PulseScanDispatcherInputs
 from products.replay_vision.backend.temporal.reconciler import create_replay_vision_reconciler_schedule
 from products.signals.backend.temporal.agentic.schedule import create_signals_scout_coordinator_schedule
 from products.tasks.backend.temporal.code_workstreams.schedule import create_evaluate_code_workstreams_schedule
@@ -94,6 +96,47 @@ from products.web_analytics.backend.temporal.weekly_digest.types import WAWeekly
 from ee.billing.salesforce_enrichment.constants import DEFAULT_CHUNK_SIZE
 
 logger = structlog.get_logger(__name__)
+
+
+async def _create_pulse_schedule(client: Client, frequency: PulseSubscriptionFrequency) -> None:
+    """Create or update a Pulse scan dispatcher schedule (8 AM UTC).
+
+    Weekly runs Monday only; daily runs every day.
+    """
+    schedule_id = f"pulse-{frequency.value}-schedule"
+    calendar_kwargs: dict = {
+        "comment": f"Pulse {frequency.value} at 8 AM UTC",
+        "hour": [ScheduleRange(start=8, end=8)],
+    }
+    if frequency == PulseSubscriptionFrequency.WEEKLY:
+        calendar_kwargs["day_of_week"] = [ScheduleRange(start=1, end=1)]
+
+    schedule = Schedule(
+        action=ScheduleActionStartWorkflow(
+            "pulse-scan-dispatcher",
+            PulseScanDispatcherInputs(frequency=frequency).model_dump(),
+            id=schedule_id,
+            task_queue=settings.MAX_AI_TASK_QUEUE,
+            retry_policy=common.RetryPolicy(maximum_attempts=1),
+        ),
+        spec=ScheduleSpec(calendars=[ScheduleCalendarSpec(**calendar_kwargs)]),
+        # SKIP a fire if the prior dispatcher run is still fanning out — matches every other
+        # recurring schedule here and avoids a same-period second dispatcher racing child starts.
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+    )
+
+    if await a_schedule_exists(client, schedule_id):
+        await a_update_schedule(client, schedule_id, schedule)
+    else:
+        await a_create_schedule(client, schedule_id, schedule, trigger_immediately=False)
+
+
+async def create_pulse_weekly_schedule(client: Client) -> None:
+    await _create_pulse_schedule(client, PulseSubscriptionFrequency.WEEKLY)
+
+
+async def create_pulse_daily_schedule(client: Client) -> None:
+    await _create_pulse_schedule(client, PulseSubscriptionFrequency.DAILY)
 
 
 async def create_sync_vectors_schedule(client: Client):
@@ -663,6 +706,8 @@ schedules = [
     create_signals_scout_coordinator_schedule,
     create_replay_vision_reconciler_schedule,
     create_evaluate_code_workstreams_schedule,
+    create_pulse_weekly_schedule,
+    create_pulse_daily_schedule,
 ]
 
 if settings.CLOUD_DEPLOYMENT:

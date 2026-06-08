@@ -39,6 +39,25 @@ from posthog.temporal.ai.slack_conversation import (
     process_slack_conversation_activity,
 )
 
+from products.pulse.backend.temporal import (
+    PulseScanDispatcherInputs,
+    PulseScanDispatcherWorkflow,
+    PulseScanInputs,
+    PulseScanWorkflow,
+    create_or_get_digest_activity,
+    emit_pulse_events_activity,
+    enrich_findings_activity,
+    fetch_findings_activity,
+    list_eligible_team_ids_activity,
+    load_scan_config_activity,
+    notify_digest_activity,
+    persist_findings_activity,
+    reconcile_stale_digests_activity,
+    set_digest_status_activity,
+    set_workflow_run_id_activity,
+    synthesize_digest_activity,
+)
+
 from .llm_traces_summaries.summarize_traces import (
     SummarizeLLMTracesInputs,
     SummarizeLLMTracesWorkflow,
@@ -63,6 +82,8 @@ AI_WORKFLOWS = [
     PostHogCodeSlackMentionCommandWorkflow,
     PostHogCodeSlackTerminateTaskWorkflow,
     AnomalyInvestigationWorkflow,
+    PulseScanWorkflow,
+    PulseScanDispatcherWorkflow,
 ]
 
 AI_ACTIVITIES = [
@@ -93,10 +114,24 @@ AI_ACTIVITIES = [
     post_posthog_code_internal_error_activity,
     process_posthog_code_terminate_task_activity,
     investigate_anomaly_activity,
+    fetch_findings_activity,
+    enrich_findings_activity,
+    persist_findings_activity,
+    notify_digest_activity,
+    emit_pulse_events_activity,
+    synthesize_digest_activity,
+    create_or_get_digest_activity,
+    set_digest_status_activity,
+    set_workflow_run_id_activity,
+    load_scan_config_activity,
+    list_eligible_team_ids_activity,
+    reconcile_stale_digests_activity,
 ]
 
 __all__ = [
     "SyncVectorsInputs",
     "SummarizeLLMTracesInputs",
     "SlackConversationRunnerWorkflowInputs",
+    "PulseScanInputs",
+    "PulseScanDispatcherInputs",
 ]
