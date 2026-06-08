@@ -185,6 +185,9 @@ rules:
                               |ProductTour
                               |ProjectSecretAPIKey
                               |PropertyAccessControl
+                              |PulseDigest
+                              |PulseFinding
+                              |PulseSubscription
                               |QuarantinedIdentifier
                               |QueryTabState
                               |QuickFilter
@@ -424,6 +427,9 @@ rules:
                         |ProductTour
                         |ProjectSecretAPIKey
                         |PropertyAccessControl
+                        |PulseDigest
+                        |PulseFinding
+                        |PulseSubscription
                         |QuarantinedIdentifier
                         |QueryTabState
                         |QuickFilter

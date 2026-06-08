@@ -118,6 +118,7 @@ depends_on = [
     "products.workflows",
     "products.actions",
     "products.alerts", "products.warehouse_sources", "products.data_tools", "products.exports", "products.annotations",
+    "products.pulse",
 ]
 layer = "modules"
 
@@ -498,6 +499,19 @@ depends_on = [
     "ee",
     "posthog",
     "products.exports",
+]
+layer = "modules"
+
+[[modules]]
+path = "products.pulse"
+depends_on = [
+    "ee",
+    "posthog",
+    "products.annotations",
+    "products.dashboards",
+    "products.error_tracking",
+    "products.notifications",
+    "products.product_analytics",
 ]
 layer = "modules"
 
