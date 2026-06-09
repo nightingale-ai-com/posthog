@@ -10,7 +10,7 @@ else:
 
 operations = [
     run_sql_with_exceptions(
-        f"ALTER TABLE IF EXISTS {TABLE_NAME} MODIFY TTL last_seen + INTERVAL 7 DAY DELETE SETTINGS materialize_ttl_after_modify = 1",
+        f"ALTER TABLE {TABLE_NAME} MODIFY TTL last_seen + INTERVAL 7 DAY DELETE SETTINGS materialize_ttl_after_modify = 1",
         node_roles=_ROLES,
         is_alter_on_replicated_table=True,
     ),
