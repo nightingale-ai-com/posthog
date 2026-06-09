@@ -212,6 +212,10 @@ def get_scoped_models() -> tuple[dict[str, set[str]], set[str], set[str], set[st
         # `(slack_workspace_id, slack_channel_id)` from the Slack event handler,
         # never by user-supplied ID. `approved_by` is for audit only.
         "SlackChannel",
+        # Discord bridge equivalents — looked up by `(guild_id, channel_id)` /
+        # `(integration, discord_user_id)` from the bot relay, never by user-supplied ID.
+        "DiscordChannel",
+        "DiscordUserLink",
         "UserActivity",
         "UserGroup",
         "UserGroupMembership",
@@ -335,6 +339,7 @@ def get_scoped_models() -> tuple[dict[str, set[str]], set[str], set[str], set[st
         "SandboxSnapshot",  # via Integration
         "SlackUserProfileCache",  # via Integration
         "SlackSettings",  # via Integration
+        "DiscordSettings",  # via Integration (guild routing default)
     }
 
     team_scoped: set[str] = set()

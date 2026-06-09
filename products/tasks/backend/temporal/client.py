@@ -38,6 +38,15 @@ def _normalize_slack_context(slack_thread_context: Optional[Any]) -> Optional[di
     return slack_thread_context
 
 
+def _normalize_chat_context(context: Optional[Any]) -> Optional[dict[str, Any]]:
+    """Convert a chat thread context (Slack or Discord) to a dict if needed."""
+    if context is None:
+        return None
+    if hasattr(context, "to_dict"):
+        return context.to_dict()
+    return context
+
+
 def _terminalize_unstarted_task_run(run_id: str, error_message: str) -> bool:
     try:
         with transaction.atomic():
@@ -143,6 +152,7 @@ async def execute_task_processing_workflow_async(
     user_id: Optional[int] = None,
     create_pr: bool = True,
     slack_thread_context: Optional[Any] = None,
+    discord_thread_context: Optional[Any] = None,
     skip_user_check: bool = False,
     posthog_mcp_scopes: PosthogMcpScopes = "read_only",
 ) -> None:
@@ -167,6 +177,7 @@ async def execute_task_processing_workflow_async(
             run_id=run_id,
             create_pr=create_pr,
             slack_thread_context=slack_context_dict,
+            discord_thread_context=_normalize_chat_context(discord_thread_context),
             posthog_mcp_scopes=posthog_mcp_scopes,
         )
 
@@ -217,6 +228,7 @@ def execute_task_processing_workflow(
     user_id: Optional[int] = None,
     create_pr: bool = True,
     slack_thread_context: Optional["SlackThreadContext"] = None,
+    discord_thread_context: Optional[Any] = None,
     skip_user_check: bool = False,
     posthog_mcp_scopes: PosthogMcpScopes = "read_only",
 ) -> None:
@@ -242,6 +254,7 @@ def execute_task_processing_workflow(
             run_id=run_id,
             create_pr=create_pr,
             slack_thread_context=slack_context_dict,
+            discord_thread_context=_normalize_chat_context(discord_thread_context),
             posthog_mcp_scopes=posthog_mcp_scopes,
         )
 

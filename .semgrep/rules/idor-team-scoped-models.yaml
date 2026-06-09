@@ -101,6 +101,7 @@ rules:
                               |DeploymentEvent
                               |DeploymentProject
                               |DesktopRecording
+                              |DiscordThreadTaskMapping
                               |EarlyAccessFeature
                               |EmailMessageMapping
                               |EvaluationContext
@@ -344,6 +345,7 @@ rules:
                         |DeploymentEvent
                         |DeploymentProject
                         |DesktopRecording
+                        |DiscordThreadTaskMapping
                         |EarlyAccessFeature
                         |EmailMessageMapping
                         |EvaluationContext

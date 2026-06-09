@@ -62,6 +62,7 @@ class Task(DeletedMetaFields, models.Model):
         USER_CREATED = "user_created", "User Created"
         AUTOMATION = "automation", "Automation"
         SLACK = "slack", "Slack"
+        DISCORD = "discord", "Discord"
         SUPPORT_QUEUE = "support_queue", "Support Queue"
         SESSION_SUMMARIES = "session_summaries", "Session Summaries"
         # Unlike the others (which indicate direct creation from that product, e.g. a "fix this error" button),

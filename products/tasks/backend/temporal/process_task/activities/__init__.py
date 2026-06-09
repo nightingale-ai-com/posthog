@@ -9,6 +9,7 @@ from .get_sandbox_for_repository import (
     get_sandbox_for_repository,
 )
 from .get_task_processing_context import TaskProcessingContext, get_task_processing_context
+from .post_discord_update import PostDiscordUpdateInput, post_discord_update
 from .post_slack_update import PostSlackUpdateInput, post_slack_update
 from .provision_sandbox import (
     CheckoutBranchInSandboxInput,
@@ -50,6 +51,7 @@ __all__ = [
     "CreateSandboxForRepositoryInput",
     "CreateSandboxForRepositoryOutput",
     "InjectFreshTokensOnResumeInput",
+    "PostDiscordUpdateInput",
     "PostSlackUpdateInput",
     "PrepareSandboxForRepositoryInput",
     "PrepareSandboxForRepositoryOutput",
@@ -74,6 +76,7 @@ __all__ = [
     "get_sandbox_for_repository",
     "get_task_processing_context",
     "inject_fresh_tokens_on_resume",
+    "post_discord_update",
     "post_slack_update",
     "prepare_sandbox_for_repository",
     "read_sandbox_logs",

@@ -156,6 +156,7 @@ class Integration(models.Model):
         CUSTOMERIO_TRACK = "customerio-track"
         CUSTOMERIO_WEBHOOK = "customerio-webhook"
         DATABRICKS = "databricks"
+        DISCORD = "discord"
         EMAIL = "email"
         FIREBASE = "firebase"
         GITHUB = "github"
@@ -1295,6 +1296,140 @@ def validate_slack_request(request: HttpRequest | Request, signing_secret: str) 
 
     if not hmac.compare_digest(my_signature, slack_signature):
         raise SlackIntegrationError("Invalid")
+
+
+DISCORD_INTEGRATION_KINDS: tuple[str, ...] = ("discord",)
+
+# OAuth scope used for the account-link flow (Discord user → PostHog user). The bot install
+# (bot + applications.commands) is handled in the companion bot repo, not here.
+POSTHOG_DISCORD_OAUTH_SCOPE = "identify"
+
+
+class DiscordIntegrationError(Exception):
+    pass
+
+
+class DiscordBotClient:
+    """HTTP client for the companion Discord bot's actions API.
+
+    The PostHog Code Discord bridge keeps the Discord bot token in the bot repo; PostHog
+    never calls Discord directly. Instead it POSTs ``{"op": ..., ...fields}`` to the bot's
+    ``/actions`` endpoint (static-bearer authed) and the bot performs the Discord REST call.
+    """
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        shared_secret: str | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self.base_url = (base_url or settings.DISCORD_BOT_ACTIONS_URL or "").rstrip("/")
+        self.shared_secret = shared_secret or settings.DISCORD_BRIDGE_SHARED_SECRET
+        self.timeout = timeout
+        if not self.base_url or not self.shared_secret:
+            raise DiscordIntegrationError("Discord bridge not configured")
+
+    def _post(self, op: str, **fields: Any) -> dict[str, Any]:
+        payload = {"op": op, **{key: value for key, value in fields.items() if value is not None}}
+        response = requests.post(
+            f"{self.base_url}/actions",
+            json=payload,
+            headers={"Authorization": f"Bearer {self.shared_secret}"},
+            timeout=self.timeout,
+        )
+        if response.status_code >= 400:
+            raise DiscordIntegrationError(
+                f"Discord bot action '{op}' failed: {response.status_code} {response.text[:200]}"
+            )
+        try:
+            return response.json()
+        except ValueError:
+            return {}
+
+    def create_thread(self, channel_id: str, name: str, message_id: str | None = None) -> dict[str, Any]:
+        return self._post("create_thread", channel_id=channel_id, name=name, message_id=message_id)
+
+    def post_message(
+        self,
+        target_id: str,
+        content: str | None = None,
+        embeds: list[dict[str, Any]] | None = None,
+        components: list[dict[str, Any]] | None = None,
+        ephemeral: bool | None = None,
+        interaction_token: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            "post_message",
+            target_id=target_id,
+            content=content,
+            embeds=embeds,
+            components=components,
+            ephemeral=ephemeral,
+            interaction_token=interaction_token,
+        )
+
+    def edit_message(
+        self,
+        target_id: str | None = None,
+        message_id: str | None = None,
+        content: str | None = None,
+        embeds: list[dict[str, Any]] | None = None,
+        components: list[dict[str, Any]] | None = None,
+        interaction_token: str | None = None,
+    ) -> dict[str, Any]:
+        return self._post(
+            "edit_message",
+            target_id=target_id,
+            message_id=message_id,
+            content=content,
+            embeds=embeds,
+            components=components,
+            interaction_token=interaction_token,
+        )
+
+    def delete_message(self, target_id: str, message_id: str) -> dict[str, Any]:
+        return self._post("delete_message", target_id=target_id, message_id=message_id)
+
+    def add_reaction(self, channel_id: str, message_id: str, emoji: str) -> dict[str, Any]:
+        return self._post("add_reaction", channel_id=channel_id, message_id=message_id, emoji=emoji)
+
+    def remove_reaction(self, channel_id: str, message_id: str, emoji: str) -> dict[str, Any]:
+        return self._post("remove_reaction", channel_id=channel_id, message_id=message_id, emoji=emoji)
+
+
+class DiscordIntegration:
+    integration: Integration
+
+    def __init__(self, integration: Integration) -> None:
+        if integration.kind not in DISCORD_INTEGRATION_KINDS:
+            raise Exception("DiscordIntegration init called with Integration with wrong 'kind'")
+
+        self.integration = integration
+
+    @property
+    def guild_id(self) -> str | None:
+        return self.integration.integration_id
+
+    @property
+    def client(self) -> DiscordBotClient:
+        return DiscordBotClient()
+
+
+def discord_bridge_configured() -> bool:
+    return bool(settings.DISCORD_BOT_ACTIONS_URL and settings.DISCORD_BRIDGE_SHARED_SECRET)
+
+
+def verify_discord_bridge_bearer(request: HttpRequest | Request) -> None:
+    """Authenticate an inbound bridge call from the Discord bot via a static bearer.
+
+    Mirrors the bot's ``verifyBearer``: constant-time compare against the shared secret.
+    Raises ``DiscordIntegrationError`` when the header is missing or does not match.
+    """
+    secret = settings.DISCORD_BRIDGE_SHARED_SECRET
+    header = request.headers.get("Authorization", "")
+    expected = f"Bearer {secret}" if secret else ""
+    if not secret or not header or not hmac.compare_digest(header.encode("utf-8"), expected.encode("utf-8")):
+        raise DiscordIntegrationError("Invalid")
 
 
 class GoogleAdsIntegration:

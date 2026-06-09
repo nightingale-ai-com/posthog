@@ -36,6 +36,17 @@ GITHUB_APP_PRIVATE_KEY = get_from_env("GITHUB_APP_PRIVATE_KEY", "")
 # which is separate from the private key used for App-as-App JWT signing.
 GITHUB_APP_CLIENT_SECRET = get_from_env("GITHUB_APP_CLIENT_SECRET", "")
 
+# Discord bridge ("PostHog Code" on Discord). The companion Discord bot holds the bot token
+# and exposes a small actions API; PostHog calls it to post/edit messages. Auth is a static
+# bearer shared between the two (same value as the bot's POSTHOG_DISCORD_SHARED_SECRET).
+# DISCORD_BOT_ACTIONS_URL is where that actions API is reachable from PostHog Cloud.
+# The bridge is inert until both DISCORD_BOT_ACTIONS_URL and DISCORD_BRIDGE_SHARED_SECRET are set.
+DISCORD_BOT_ACTIONS_URL = get_from_env("DISCORD_BOT_ACTIONS_URL", "")
+DISCORD_BRIDGE_SHARED_SECRET = get_from_env("DISCORD_BRIDGE_SHARED_SECRET", "")
+# OAuth app credentials for the account-link flow (Discord user → PostHog user, `identify` scope).
+DISCORD_APP_CLIENT_ID = get_from_env("DISCORD_APP_CLIENT_ID", "")
+DISCORD_APP_CLIENT_SECRET = get_from_env("DISCORD_APP_CLIENT_SECRET", "")
+
 ZENDESK_ADMIN_EMAIL = get_from_env("ZENDESK_ADMIN_EMAIL", "")
 ZENDESK_API_TOKEN = get_from_env("ZENDESK_API_TOKEN", "")
 ZENDESK_SUBDOMAIN = get_from_env("ZENDESK_SUBDOMAIN", "posthoghelp")

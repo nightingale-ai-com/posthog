@@ -49,6 +49,12 @@ from posthog.temporal.codec_server import decode_payloads
 from products.ai_observability.backend.api.personal_spend import personal_spend_eu_redirect
 from products.cdp.backend.api import hog_function_template
 from products.data_warehouse.backend.api.public_source_configs import PublicSourceConfigViewSet
+from products.discord_app.backend.api import (
+    discord_interactions_ingest,
+    discord_oauth_link_callback,
+    discord_oauth_link_start,
+    discord_repos,
+)
 from products.early_access_features.backend.api import early_access_features
 from products.legal_documents.backend.presentation.webhook import legal_document_pandadoc_webhook
 from products.messaging.backend.api.customerio_webhook import CustomerIOWebhookView
@@ -406,6 +412,11 @@ urlpatterns = [
     opt_slash_path("slack/interactivity-callback", posthog_code_interactivity_handler),
     opt_slash_path("slack/event-callback", posthog_code_event_handler),
     opt_slash_path("slack/workspace/claims", slack_workspace_claims_view),
+    # Discord bridge — companion bot forwards interactions here; PostHog drives via the bot's actions API
+    opt_slash_path("api/discord/interactions/ingest", discord_interactions_ingest),
+    opt_slash_path("api/discord/repos", discord_repos),
+    opt_slash_path("api/discord/oauth/link/start", discord_oauth_link_start),
+    opt_slash_path("api/discord/oauth/link/callback", discord_oauth_link_callback),
     # GitHub App webhook — fans out to tasks (PRs) and conversations (issues)
     opt_slash_path("webhooks/github/pr", github_webhook),
     opt_slash_path("webhooks/github", github_webhook),

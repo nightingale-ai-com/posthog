@@ -53,6 +53,7 @@ PRODUCTS_APPS = [
     "products.customer_analytics.backend.apps.CustomerAnalyticsConfig",
     "products.conversations.backend.apps.ConversationsConfig",
     "products.slack_app.backend.apps.SlackAppConfig",
+    "products.discord_app.backend.apps.DiscordAppConfig",
     "products.product_tours.backend.apps.ProductToursConfig",
     "products.workflows.backend.apps.WorkflowsConfig",
     "products.cdp.backend.apps.CdpConfig",

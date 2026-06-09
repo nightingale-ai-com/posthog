@@ -5,6 +5,18 @@ from posthog.temporal.ai.chat_agent import (
     process_chat_agent_activity,
     process_conversation_activity,
 )
+from posthog.temporal.ai.posthog_code_discord_interactivity import (
+    PostHogCodeDiscordTerminateTaskWorkflow,
+    process_posthog_code_discord_terminate_task_activity,
+)
+from posthog.temporal.ai.posthog_code_discord_mention import (
+    PostHogCodeDiscordMentionWorkflow,
+    create_discord_task_activity,
+    enforce_discord_billing_quota_activity,
+    post_discord_repo_picker_activity,
+    prepare_discord_thread_activity,
+    resolve_discord_repository_activity,
+)
 from posthog.temporal.ai.posthog_code_slack_interactivity import (
     PostHogCodeSlackTerminateTaskWorkflow,
     process_posthog_code_terminate_task_activity,
@@ -62,6 +74,8 @@ AI_WORKFLOWS = [
     PostHogCodeSlackMentionWorkflow,
     PostHogCodeSlackMentionCommandWorkflow,
     PostHogCodeSlackTerminateTaskWorkflow,
+    PostHogCodeDiscordMentionWorkflow,
+    PostHogCodeDiscordTerminateTaskWorkflow,
     AnomalyInvestigationWorkflow,
 ]
 
@@ -92,6 +106,12 @@ AI_ACTIVITIES = [
     post_posthog_code_picker_timeout_activity,
     post_posthog_code_internal_error_activity,
     process_posthog_code_terminate_task_activity,
+    enforce_discord_billing_quota_activity,
+    prepare_discord_thread_activity,
+    resolve_discord_repository_activity,
+    post_discord_repo_picker_activity,
+    create_discord_task_activity,
+    process_posthog_code_discord_terminate_task_activity,
     investigate_anomaly_activity,
 ]
 

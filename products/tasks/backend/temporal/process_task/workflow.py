@@ -30,6 +30,7 @@ from .activities.get_task_processing_context import (
     TaskProcessingContext,
     get_task_processing_context,
 )
+from .activities.post_discord_update import PostDiscordUpdateInput, post_discord_update
 from .activities.post_slack_update import PostSlackUpdateInput, post_slack_update
 from .activities.provision_sandbox import (
     CheckoutBranchInSandboxInput,
@@ -57,6 +58,7 @@ class ProcessTaskInput:
     run_id: str
     create_pr: bool = True
     slack_thread_context: Optional[dict[str, Any]] = None
+    discord_thread_context: Optional[dict[str, Any]] = None
     posthog_mcp_scopes: PosthogMcpScopes = "read_only"
 
 
@@ -141,6 +143,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
     def __init__(self) -> None:
         self._context: Optional[TaskProcessingContext] = None
         self._slack_thread_context: Optional[dict[str, Any]] = None
+        self._discord_thread_context: Optional[dict[str, Any]] = None
         self._posthog_mcp_scopes: PosthogMcpScopes = "read_only"
         self._sandbox_id_for_cleanup: Optional[str] = None
         self._task_completed: bool = False
@@ -174,6 +177,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
             run_id=loaded["run_id"],
             create_pr=loaded.get("create_pr", True),
             slack_thread_context=loaded.get("slack_thread_context"),
+            discord_thread_context=loaded.get("discord_thread_context"),
             posthog_mcp_scopes=loaded.get("posthog_mcp_scopes", "read_only"),
         )
 
@@ -368,6 +372,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         run_id = input.run_id
         self._sandbox_id_for_cleanup = None
         self._slack_thread_context = input.slack_thread_context
+        self._discord_thread_context = input.discord_thread_context
         credential_refresh_task: asyncio.Task[None] | None = None
         try:
             self._context = await self._get_task_processing_context(input)
@@ -612,7 +617,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                 sandbox_cleaned = True
                 self._sandbox_id_for_cleanup = None
 
-            if sandbox_cleaned and self._slack_thread_context and self._context:
+            if sandbox_cleaned and (self._slack_thread_context or self._discord_thread_context) and self._context:
                 await self._post_slack_update(sandbox_cleaned=True)
 
     async def _get_task_processing_context(self, input: ProcessTaskInput) -> TaskProcessingContext:
@@ -933,18 +938,29 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         )
 
     async def _post_slack_update(self, sandbox_cleaned: bool = False) -> None:
-        if not self._slack_thread_context:
-            return
-        await workflow.execute_activity(
-            post_slack_update,
-            PostSlackUpdateInput(
-                run_id=self.context.run_id,
-                slack_thread_context=self._slack_thread_context,
-                sandbox_cleaned=sandbox_cleaned,
-            ),
-            start_to_close_timeout=timedelta(seconds=30),
-            retry_policy=RetryPolicy(maximum_attempts=2),
-        )
+        """Relay task status to whichever chat transport launched this run (Slack or Discord)."""
+        if self._slack_thread_context:
+            await workflow.execute_activity(
+                post_slack_update,
+                PostSlackUpdateInput(
+                    run_id=self.context.run_id,
+                    slack_thread_context=self._slack_thread_context,
+                    sandbox_cleaned=sandbox_cleaned,
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        if self._discord_thread_context:
+            await workflow.execute_activity(
+                post_discord_update,
+                PostDiscordUpdateInput(
+                    run_id=self.context.run_id,
+                    discord_thread_context=self._discord_thread_context,
+                    sandbox_cleaned=sandbox_cleaned,
+                ),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
 
     @temporalio.workflow.signal
     async def complete_task(self, status: str = "completed", error_message: Optional[str] = None) -> None:
