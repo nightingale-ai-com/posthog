@@ -1,5 +1,6 @@
 # Workflows in this module run on the max-ai temporal task queue.
 import json
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Literal
@@ -9,6 +10,7 @@ from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
 from posthog.temporal.common.base import PostHogWorkflow
+from posthog.temporal.common.heartbeat import Heartbeater
 
 logger = structlog.get_logger(__name__)
 
@@ -113,22 +115,34 @@ class PostHogCodeDiscordMentionWorkflow(PostHogWorkflow):
 
             repository: str | None = resolution.get("repository")
             if resolution.get("mode") == "needs_picker":
-                workflow_id = workflow.info().workflow_id
-                await workflow.execute_activity(
-                    post_discord_repo_picker_activity,
-                    args=(inputs, thread_id, workflow_id),
+                # Mirror the Slack cascade: Haiku gate ("does this need a repo at all?"),
+                # then the discovery agent, with the interactive picker as the failure fallback.
+                needs_repo = await workflow.execute_activity(
+                    classify_discord_task_needs_repo_activity,
+                    inputs,
                     start_to_close_timeout=timeout,
                     retry_policy=retry,
                 )
-                try:
-                    await workflow.wait_condition(
-                        lambda: self._repo_selection_resolved,
-                        timeout=timedelta(minutes=POSTHOG_CODE_DISCORD_PICKER_TIMEOUT_MINUTES),
+                if not needs_repo:
+                    repository = None
+                else:
+                    outcome: dict[str, Any] = await workflow.execute_activity(
+                        discover_discord_repository_via_agent_activity,
+                        args=(inputs, thread_id, anchor_message_id),
+                        start_to_close_timeout=timeout,
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                        heartbeat_timeout=timedelta(minutes=2),
                     )
-                except TimeoutError:
-                    await self._notify_failure(inputs, thread_id, anchor_message_id, PICKER_TIMEOUT_MESSAGE)
-                    return
-                repository = self._selected_repo
+                    if outcome.get("status") == "found":
+                        repository = outcome.get("repository")
+                    elif outcome.get("status") == "no_match":
+                        repository = None
+                    else:
+                        repository = await self._pick_repository_interactively(
+                            inputs, thread_id, anchor_message_id, outcome.get("reason")
+                        )
+                        if not self._repo_selection_resolved:
+                            return
 
             await workflow.execute_activity(
                 create_discord_task_activity,
@@ -142,6 +156,34 @@ class PostHogCodeDiscordMentionWorkflow(PostHogWorkflow):
                 extra={"guild_id": inputs.guild_id, "error": str(exc), "error_type": type(exc).__name__},
             )
             await self._notify_failure(inputs, thread_id, anchor_message_id, INTERNAL_ERROR_MESSAGE)
+
+    async def _pick_repository_interactively(
+        self,
+        inputs: PostHogCodeDiscordMentionWorkflowInputs,
+        thread_id: str,
+        anchor_message_id: str,
+        note: str | None,
+    ) -> str | None:
+        """Post the repo picker and wait for the selection signal.
+
+        On timeout, notifies the user and returns with ``_repo_selection_resolved`` still
+        False — callers use that to abort instead of starting a task nobody asked for.
+        """
+        await workflow.execute_activity(
+            post_discord_repo_picker_activity,
+            args=(inputs, thread_id, workflow.info().workflow_id, note),
+            start_to_close_timeout=timedelta(seconds=POSTHOG_CODE_DISCORD_MENTION_TIMEOUT_SECONDS),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+        try:
+            await workflow.wait_condition(
+                lambda: self._repo_selection_resolved,
+                timeout=timedelta(minutes=POSTHOG_CODE_DISCORD_PICKER_TIMEOUT_MINUTES),
+            )
+        except TimeoutError:
+            await self._notify_failure(inputs, thread_id, anchor_message_id, PICKER_TIMEOUT_MESSAGE)
+            return None
+        return self._selected_repo
 
     async def _notify_failure(
         self,
@@ -253,14 +295,82 @@ def resolve_discord_repository_activity(inputs: PostHogCodeDiscordMentionWorkflo
 
 
 @activity.defn
+def classify_discord_task_needs_repo_activity(inputs: PostHogCodeDiscordMentionWorkflowInputs) -> bool:
+    """Haiku gate: does this prompt need repository access at all?
+
+    Slash commands carry no thread history at invocation, so the classifier runs on the
+    prompt alone. Defaults to True on error (shared classifier is conservative).
+    """
+    from products.tasks.backend.repo_selection.classifier import classify_task_needs_repo
+
+    prompt = (inputs.interaction.get("options") or {}).get("prompt") or ""
+    return classify_task_needs_repo(prompt, [], product="posthog_code")
+
+
+@activity.defn
+async def discover_discord_repository_via_agent_activity(
+    inputs: PostHogCodeDiscordMentionWorkflowInputs, thread_id: str, anchor_message_id: str
+) -> dict[str, Any]:
+    """Run the shared repo discovery agent over the /ph prompt.
+
+    Returns ``{"status": "found"|"no_match"|"failed", "repository", "reason"}`` — all
+    exceptions are caught and surfaced as ``failed`` so the workflow falls back to the
+    interactive picker. Mirrors the Slack bridge's wrapper.
+    """
+    from products.tasks.backend.models import Task
+    from products.tasks.backend.repo_selection.agent import (
+        RepoSelectionRejectedError,
+        RepoSelectionUnavailableError,
+        select_repository,
+    )
+
+    integration, client = await asyncio.to_thread(_get_integration_and_client, inputs.integration_id)
+
+    # The agent takes 10–60s; repurpose the anchor as a progress indicator meanwhile.
+    if anchor_message_id:
+        try:
+            await asyncio.to_thread(
+                client.edit_message,
+                target_id=thread_id,
+                message_id=anchor_message_id,
+                content="**Finding the right repository…** 🔍",
+            )
+        except Exception:
+            logger.warning("posthog_code_discord_discovery_progress_edit_failed")
+
+    prompt = (inputs.interaction.get("options") or {}).get("prompt") or ""
+    try:
+        async with Heartbeater():
+            result = await select_repository(
+                team_id=integration.team_id,
+                user_id=inputs.user_id,
+                context=prompt,
+                origin_product=Task.OriginProduct.DISCORD,
+            )
+    except RepoSelectionRejectedError:
+        # Don't echo the returned repository — it's raw LLM output and reaches Discord.
+        return {"status": "failed", "repository": None, "reason": "Agent returned an unrecognized repository."}
+    except RepoSelectionUnavailableError as exc:
+        return {"status": "failed", "repository": None, "reason": f"Repo selection unavailable: {exc.reason}"}
+    except Exception as exc:
+        logger.exception("posthog_code_discord_repo_discovery_failed", error=str(exc))
+        return {"status": "failed", "repository": None, "reason": f"Agent failed: {type(exc).__name__}"}
+
+    if result.repository is None:
+        return {"status": "no_match", "repository": None, "reason": result.reason}
+    return {"status": "found", "repository": result.repository, "reason": result.reason}
+
+
+@activity.defn
 def post_discord_repo_picker_activity(
-    inputs: PostHogCodeDiscordMentionWorkflowInputs, thread_id: str, workflow_id: str
+    inputs: PostHogCodeDiscordMentionWorkflowInputs, thread_id: str, workflow_id: str, note: str | None = None
 ) -> None:
     """Post a repo string-select (≤25) + "No repo needed" button into the thread.
 
     The custom_id carries the workflow id so the ingress can signal this workflow when the
     user picks. Discord string selects cap at 25 options (no live typeahead) — autocomplete
-    on the ``repo:`` command option covers larger orgs.
+    on the ``repo:`` command option covers larger orgs. ``note`` (e.g. why the discovery
+    agent fell back) is shown italicized above the prompt.
     """
     from products.discord_app.backend.repos import MAX_AUTOCOMPLETE_CHOICES, get_full_repo_names
 
@@ -293,7 +403,7 @@ def post_discord_repo_picker_activity(
     try:
         client.post_message(
             target_id=thread_id,
-            content="Which repository should I work in?",
+            content=f"*{note}*\nWhich repository should I work in?" if note else "Which repository should I work in?",
             components=components,
         )
     except Exception:
