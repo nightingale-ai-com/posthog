@@ -463,6 +463,8 @@ def create_discord_task_activity(
     thread_id: str,
 ) -> None:
     """Create the Task + TaskRun + thread mapping, then start the process workflow."""
+    from posthog.models.scoping import team_scope
+
     from products.discord_app.backend.discord_thread import DiscordThreadContext
     from products.discord_app.backend.models import DiscordThreadTaskMapping
     from products.tasks.backend.models import Task, TaskRun
@@ -498,26 +500,30 @@ def create_discord_task_activity(
             initial_permission_mode="bypassPermissions",
         )
     except Exception:
+        # Re-raise so the workflow's failure handler notifies the user — swallowing here
+        # leaves the anchor stuck on a progress message forever.
         logger.exception("posthog_code_discord_task_creation_failed", team_id=integration.team_id)
-        return
+        raise
 
     task_run = task.latest_run if task else None
     if not task or not task_run:
-        return
+        raise RuntimeError(f"Task {task.id if task else '?'} was created without a run")
 
-    DiscordThreadTaskMapping.objects.update_or_create(
-        integration=integration,
-        channel_id=thread_id,
-        thread_id=thread_id,
-        defaults={
-            "team": integration.team,
-            "guild_id": inputs.guild_id,
-            "anchor_message_id": anchor_message_id,
-            "task": task,
-            "task_run": task_run,
-            "discord_user_id": inputs.discord_user_id,
-        },
-    )
+    # DiscordThreadTaskMapping is fail-closed team-scoped; this is a same-team write.
+    with team_scope(integration.team_id):
+        DiscordThreadTaskMapping.objects.update_or_create(
+            integration=integration,
+            channel_id=thread_id,
+            thread_id=thread_id,
+            defaults={
+                "team": integration.team,
+                "guild_id": inputs.guild_id,
+                "anchor_message_id": anchor_message_id,
+                "task": task,
+                "task_run": task_run,
+                "discord_user_id": inputs.discord_user_id,
+            },
+        )
 
     try:
         TaskRun.update_state_atomic(
