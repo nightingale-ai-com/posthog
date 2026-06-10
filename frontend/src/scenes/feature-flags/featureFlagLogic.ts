@@ -1287,7 +1287,10 @@ export const featureFlagLogic = kea<featureFlagLogicType>([
                     }
 
                     if (flagType !== 'remote_config') {
-                        const conditionsConfig = values.defaultReleaseConditions
+                        // Await the fetch so defaults apply even on a fresh page load.
+                        const conditionsConfig = await defaultReleaseConditionsLogic.asyncActions
+                            .loadDefaultReleaseConditions()
+                            .catch(() => values.defaultReleaseConditions)
                         if (conditionsConfig?.enabled && conditionsConfig.default_groups?.length > 0) {
                             const aggregationGroupTypeIndex =
                                 conditionsConfig.default_groups.find(
