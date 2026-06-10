@@ -82,7 +82,11 @@ export const manifest: ProductManifest = {
         {
             path: 'Visual review',
             intents: [ProductKey.VISUAL_REVIEW],
-            category: ProductItemCategory.UNRELEASED,
+            // Flag-gated to alpha users only, but those users land on run pages
+            // straight from GitHub links — keep it in a named product group
+            // ("Tools") rather than the bottom "Unreleased" bucket so the nav
+            // gives the page a clear product home.
+            category: ProductItemCategory.TOOLS,
             href: urls.visualReviewRuns(),
             iconType: 'visual_review' as FileSystemIconType,
             flag: FEATURE_FLAGS.VISUAL_REVIEW,
