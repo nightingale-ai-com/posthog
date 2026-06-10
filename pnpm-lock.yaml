@@ -2627,6 +2627,8 @@ importers:
 
   products/desktop_recordings: {}
 
+  products/discord_app: {}
+
   products/early_access_features:
     dependencies:
       '@posthog/icons':
