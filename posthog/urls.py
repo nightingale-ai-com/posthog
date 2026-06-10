@@ -366,6 +366,12 @@ urlpatterns = [
         WizardClientMetadataView.as_view(),
         name="wizard-client-metadata",
     ),
+    # Discord bridge — companion bot forwards interactions here; PostHog drives via the bot's
+    # actions API. Must precede the `^api.+` catch-all below or these resolve to api_not_found.
+    opt_slash_path("api/discord/interactions/ingest", discord_interactions_ingest),
+    opt_slash_path("api/discord/repos", discord_repos),
+    opt_slash_path("api/discord/oauth/link/start", discord_oauth_link_start),
+    opt_slash_path("api/discord/oauth/link/callback", discord_oauth_link_callback),
     re_path(r"^api.+", api_not_found),
     path("authorize_and_redirect/", login_required(authorize_and_redirect)),
     path(
@@ -412,11 +418,6 @@ urlpatterns = [
     opt_slash_path("slack/interactivity-callback", posthog_code_interactivity_handler),
     opt_slash_path("slack/event-callback", posthog_code_event_handler),
     opt_slash_path("slack/workspace/claims", slack_workspace_claims_view),
-    # Discord bridge — companion bot forwards interactions here; PostHog drives via the bot's actions API
-    opt_slash_path("api/discord/interactions/ingest", discord_interactions_ingest),
-    opt_slash_path("api/discord/repos", discord_repos),
-    opt_slash_path("api/discord/oauth/link/start", discord_oauth_link_start),
-    opt_slash_path("api/discord/oauth/link/callback", discord_oauth_link_callback),
     # GitHub App webhook — fans out to tasks (PRs) and conversations (issues)
     opt_slash_path("webhooks/github/pr", github_webhook),
     opt_slash_path("webhooks/github", github_webhook),
