@@ -51,8 +51,7 @@ def get_full_repo_names(integration: Integration, *, user_id: int | None) -> lis
                 return result
 
     result = sorted(all_repos)
-    if result:
-        cache.set(cache_key, result, timeout=REPO_LIST_CACHE_TTL_SECONDS)
+    cache.set(cache_key, result, timeout=REPO_LIST_CACHE_TTL_SECONDS)
     return result
 
 

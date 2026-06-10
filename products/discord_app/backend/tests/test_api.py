@@ -1,8 +1,9 @@
 import json
 
+import pytest
 from unittest.mock import MagicMock, patch
 
-from django.test import RequestFactory, override_settings
+from django.test import RequestFactory
 
 from products.discord_app.backend import api
 from products.discord_app.backend.services.integration_resolver import ResolutionResult
@@ -25,8 +26,12 @@ def _resolution(integration):
     )
 
 
-@override_settings(DISCORD_BRIDGE_SHARED_SECRET=SECRET)
 class TestIngestDispatch:
+    # override_settings cannot decorate plain (non-SimpleTestCase) classes
+    @pytest.fixture(autouse=True)
+    def _bridge_secret(self, settings):
+        settings.DISCORD_BRIDGE_SHARED_SECRET = SECRET
+
     def test_unauthorized_without_bearer(self):
         request = RequestFactory().post("/api/discord/interactions/ingest", data="{}", content_type="application/json")
         assert api.discord_interactions_ingest(request).status_code == 401
@@ -79,6 +84,56 @@ class TestIngestDispatch:
             )
         assert json.loads(resp.content)["status"] == "accepted"
         start.assert_called_once()
+
+    def test_project_set_works_when_no_default_resolved(self):
+        # `/posthog-project set` is the escape hatch from ambiguity, so it must not be
+        # gated on a resolved integration itself.
+        target = MagicMock(id=9, team_id=123)
+        ambiguous = ResolutionResult(integration=None, source="needs_picker", candidates=[MagicMock(), MagicMock()])
+        with (
+            patch.object(api, "load_integrations", return_value=ambiguous),
+            patch.object(api, "_integration_for_project_id", return_value=target),
+            patch.object(api.commands_dispatch, "handle_project_set", return_value="default set") as set_handler,
+        ):
+            resp = api.discord_interactions_ingest(
+                _ingest_request(
+                    {
+                        "kind": "command",
+                        "command": "posthog-project",
+                        "subcommand": "set",
+                        "guild_id": "g",
+                        "user": {"id": "u"},
+                        "options": {"project_id": "123"},
+                    }
+                )
+            )
+        body = json.loads(resp.content)
+        assert body["action"] == "ephemeral"
+        assert body["content"] == "default set"
+        set_handler.assert_called_once()
+
+    def test_project_show_lists_candidates_when_ambiguous(self):
+        candidate = MagicMock()
+        candidate.team_id = 1
+        candidate.team.name = "Team One"
+        candidate.team.organization.name = "Org"
+        ambiguous = ResolutionResult(integration=None, source="needs_picker", candidates=[candidate, MagicMock()])
+        with patch.object(api, "load_integrations", return_value=ambiguous):
+            resp = api.discord_interactions_ingest(
+                _ingest_request(
+                    {
+                        "kind": "command",
+                        "command": "posthog-project",
+                        "subcommand": "show",
+                        "guild_id": "g",
+                        "user": {"id": "u"},
+                    }
+                )
+            )
+        body = json.loads(resp.content)
+        assert body["action"] == "ephemeral"
+        assert "No default project set" in body["content"]
+        assert "Team One" in body["content"]
 
     def test_repo_select_component_signals_workflow(self):
         with patch.object(api, "_signal_workflow") as signal:

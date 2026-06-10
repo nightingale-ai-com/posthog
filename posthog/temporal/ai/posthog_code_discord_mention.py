@@ -21,6 +21,12 @@ _EYES = "\U0001f440"
 REPO_SELECT_CUSTOM_ID = "posthog_code_repo_select"
 REPO_NONE_CUSTOM_ID = "posthog_code_repo_none"
 
+INTERNAL_ERROR_MESSAGE = "**Something went wrong** ❌\nI ran into an internal error and couldn't start the task. Please try `/posthog` again."
+PICKER_TIMEOUT_MESSAGE = (
+    f"**No repository selected** — I waited {POSTHOG_CODE_DISCORD_PICKER_TIMEOUT_MINUTES} minutes, "
+    "so this task wasn't started. Run `/posthog` again when you're ready."
+)
+
 
 @dataclass
 class PostHogCodeDiscordMentionWorkflowInputs:
@@ -76,6 +82,8 @@ class PostHogCodeDiscordMentionWorkflow(PostHogWorkflow):
     async def run(self, inputs: PostHogCodeDiscordMentionWorkflowInputs) -> None:
         timeout = timedelta(seconds=POSTHOG_CODE_DISCORD_MENTION_TIMEOUT_SECONDS)
         retry = RetryPolicy(maximum_attempts=2)
+        anchor_message_id: str | None = None
+        thread_id: str | None = None
 
         try:
             blocked = await workflow.execute_activity(
@@ -118,7 +126,8 @@ class PostHogCodeDiscordMentionWorkflow(PostHogWorkflow):
                         timeout=timedelta(minutes=POSTHOG_CODE_DISCORD_PICKER_TIMEOUT_MINUTES),
                     )
                 except TimeoutError:
-                    self._repo_selection_resolved = True
+                    await self._notify_failure(inputs, thread_id, anchor_message_id, PICKER_TIMEOUT_MESSAGE)
+                    return
                 repository = self._selected_repo
 
             await workflow.execute_activity(
@@ -127,8 +136,30 @@ class PostHogCodeDiscordMentionWorkflow(PostHogWorkflow):
                 start_to_close_timeout=timeout,
                 retry_policy=retry,
             )
+        except Exception as exc:
+            workflow.logger.exception(
+                "posthog_code_discord_mention_failed",
+                extra={"guild_id": inputs.guild_id, "error": str(exc), "error_type": type(exc).__name__},
+            )
+            await self._notify_failure(inputs, thread_id, anchor_message_id, INTERNAL_ERROR_MESSAGE)
+
+    async def _notify_failure(
+        self,
+        inputs: PostHogCodeDiscordMentionWorkflowInputs,
+        thread_id: str | None,
+        anchor_message_id: str | None,
+        message: str,
+    ) -> None:
+        """Best-effort: never let the anchor sit on "PostHog Code is on it…" after a failure."""
+        try:
+            await workflow.execute_activity(
+                post_discord_workflow_failure_activity,
+                args=(inputs, thread_id, anchor_message_id, message),
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
         except Exception:
-            logger.exception("posthog_code_discord_mention_failed", guild_id=inputs.guild_id)
+            workflow.logger.exception("posthog_code_discord_failure_notice_failed")
 
 
 def _get_integration_and_client(integration_id: int) -> tuple[Any, Any]:
@@ -177,14 +208,15 @@ def prepare_discord_thread_activity(inputs: PostHogCodeDiscordMentionWorkflowInp
     the thread id. Returns the anchor message id and thread id.
     """
     _integration, client = _get_integration_and_client(inputs.integration_id)
-    channel_id = inputs.interaction.get("channel_id")
+    channel_id = str(inputs.interaction.get("channel_id") or "")
     prompt = (inputs.interaction.get("options") or {}).get("prompt") or "Task from Discord"
     title = prompt.strip()[:80] or "PostHog Code task"
 
     thread = client.create_thread(channel_id=channel_id, name=title, message_id=inputs.interaction.get("message_id"))
-    thread_id = thread.get("thread_id") or channel_id
+    thread_id = str(thread.get("thread_id") or "") or channel_id
 
-    anchor = client.post_message(target_id=thread_id, content="**PostHog Code is on it…** :hourglass_flowing_sand:")
+    # Discord renders :shortcodes: in API-sent content literally, so use unicode emoji.
+    anchor = client.post_message(target_id=thread_id, content="**PostHog Code is on it…** ⏳")
     anchor_message_id = anchor.get("message_id", "")
 
     if anchor_message_id:
@@ -266,6 +298,26 @@ def post_discord_repo_picker_activity(
         )
     except Exception:
         logger.exception("posthog_code_discord_repo_picker_post_failed")
+
+
+@activity.defn
+def post_discord_workflow_failure_activity(
+    inputs: PostHogCodeDiscordMentionWorkflowInputs,
+    thread_id: str | None,
+    anchor_message_id: str | None,
+    message: str,
+) -> None:
+    """Surface a failure to the user: edit the anchor in place when it exists, else post ephemerally."""
+    _integration, client = _get_integration_and_client(inputs.integration_id)
+    if thread_id and anchor_message_id:
+        client.edit_message(target_id=thread_id, message_id=anchor_message_id, content=message)
+        return
+    client.post_message(
+        target_id=thread_id or inputs.interaction.get("channel_id"),
+        content=message,
+        ephemeral=True,
+        interaction_token=inputs.interaction.get("interaction_token"),
+    )
 
 
 @activity.defn

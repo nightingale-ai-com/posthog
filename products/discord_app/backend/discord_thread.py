@@ -13,8 +13,9 @@ UPSTREAM_PROVIDER_FAILURE_MESSAGE = (
 )
 UPSTREAM_PROVIDER_ERROR_STATUS_PATTERN = re.compile(r"\bapi error:\s*(?:429|5\d\d)\b", re.IGNORECASE)
 
-# Discord has no custom-emoji equivalent of Slack's :hedgehog:; map the names the relay uses
-# to unicode the bot can react with verbatim.
+# Discord does not expand :shortcodes: in API-sent content (that's a client-side input
+# feature), so both reactions and message text below use literal unicode emoji.
+# Map the names the relay uses to unicode the bot can react with verbatim.
 _REACTION_EMOJI = {
     "eyes": "\U0001f440",  # 👀
     "hedgehog": "\U0001f994",  # 🦔
@@ -130,7 +131,7 @@ class DiscordThreadHandler:
 
     def post_or_update_progress(self, stage: str, task_url: str | None = None) -> None:
         """Edit the anchor message to reflect the current stage (a single evolving status)."""
-        content = f"**Working on task…** :hourglass_flowing_sand:\nStage: {stage}"
+        content = f"**Working on task…** ⏳\nStage: {stage}"
         components = _link_button_row([("View agent logs", task_url)] if task_url else [])
         try:
             client = self._get_client()
@@ -151,7 +152,7 @@ class DiscordThreadHandler:
         buttons = [("View PR", pr_url)]
         if task_url:
             buttons.append(("Open in PostHog Code", task_url))
-        self._post_thread("**Pull request opened** :rocket:", _link_button_row(buttons))
+        self._post_thread("**Pull request opened** 🚀", _link_button_row(buttons))
 
     def post_pr_opened(self, pr_url: str, task_url: str | None) -> None:
         mention = f"<@{self.context.discord_user_id}> " if self.context.discord_user_id else ""
@@ -164,7 +165,7 @@ class DiscordThreadHandler:
         self._post_thread(text, [])
 
     def post_completion(self, pr_url: str | None, task_url: str | None) -> None:
-        header = "**Pull request created** :rocket:" if pr_url else "**Task completed** :hedgehog:"
+        header = "**Pull request created** 🚀" if pr_url else "**Task completed** 🦔"
         buttons: list[tuple[str, str]] = []
         if pr_url:
             buttons.append(("View PR", pr_url))
@@ -175,13 +176,13 @@ class DiscordThreadHandler:
     def post_error(self, error: str, task_url: str | None) -> None:
         error = _format_task_error(error)
         truncated = error[:200]
-        content = f"**Task failed** :x:\n{truncated}"
+        content = f"**Task failed** ❌\n{truncated}"
         buttons = [("See details in PostHog Code", task_url)] if task_url else []
         self._post_thread(content, _link_button_row(buttons))
 
     def post_cancelled(self, task_url: str | None) -> None:
         buttons = [("Open in PostHog Code", task_url)] if task_url else []
-        self._post_thread("**Sandbox stopped** :hedgehog:", _link_button_row(buttons))
+        self._post_thread("**Sandbox stopped** 🦔", _link_button_row(buttons))
 
     def delete_progress(self) -> None:
         # Progress lives on the anchor message (edited in place), so there is no separate

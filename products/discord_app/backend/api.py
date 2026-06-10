@@ -30,7 +30,11 @@ from posthog.temporal.common.client import sync_connect
 from products.discord_app.backend.models import DiscordUserLink
 from products.discord_app.backend.repos import repo_autocomplete_choices
 from products.discord_app.backend.services import commands as commands_dispatch
-from products.discord_app.backend.services.integration_resolver import load_integrations
+from products.discord_app.backend.services.integration_resolver import (
+    ResolutionResult,
+    format_project_candidate_list,
+    load_integrations,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -100,14 +104,13 @@ def discord_interactions_ingest(request: HttpRequest) -> HttpResponse:
     return JsonResponse({"error": "unknown kind"}, status=400)
 
 
-def _resolve_integration(payload: dict[str, Any]) -> Any:
-    result = load_integrations(
+def _resolve_integration(payload: dict[str, Any]) -> ResolutionResult:
+    return load_integrations(
         guild_id=payload.get("guild_id", ""),
         discord_user_id=(payload.get("user") or {}).get("id", ""),
         channel_id=payload.get("channel_id"),
         thread_id=payload.get("channel_id"),
     )
-    return result
 
 
 def _handle_command(payload: dict[str, Any]) -> HttpResponse:
@@ -118,6 +121,11 @@ def _handle_command(payload: dict[str, Any]) -> HttpResponse:
 
     resolution = _resolve_integration(payload)
     integration = resolution.integration
+
+    # `/posthog-project` must work without a resolved default — it's the command that sets one.
+    if command == "posthog-project":
+        return _handle_project_command(payload, resolution, guild_id, discord_user_id)
+
     if integration is None:
         if not resolution.candidates:
             return _ephemeral("This server isn't connected to PostHog yet.")
@@ -127,8 +135,6 @@ def _handle_command(payload: dict[str, Any]) -> HttpResponse:
         return _handle_posthog_command(payload, integration, guild_id, discord_user_id)
     if command == "posthog-rules":
         return _handle_rules_command(payload, integration, discord_user_id)
-    if command == "posthog-project":
-        return _handle_project_command(payload, integration, guild_id, discord_user_id)
     return JsonResponse({"error": "unknown command"}, status=400)
 
 
@@ -188,12 +194,20 @@ def _handle_rules_command(payload: dict[str, Any], integration: Integration, dis
 
 
 def _handle_project_command(
-    payload: dict[str, Any], integration: Integration, guild_id: str, discord_user_id: str
+    payload: dict[str, Any], resolution: ResolutionResult, guild_id: str, discord_user_id: str
 ) -> HttpResponse:
     options = payload.get("options") or {}
     sub = payload.get("subcommand")
     if sub == "show" or sub is None:
-        return _ephemeral(commands_dispatch.handle_project_show(integration))
+        if resolution.integration is not None:
+            return _ephemeral(commands_dispatch.handle_project_show(resolution.integration))
+        if not resolution.candidates:
+            return _ephemeral("This server isn't connected to PostHog yet.")
+        return _ephemeral(
+            "No default project set. Connected projects:\n"
+            + format_project_candidate_list(resolution.candidates)
+            + "\n\nSet yours with `/posthog-project set <id>`."
+        )
 
     target = _integration_for_project_id(guild_id, options.get("project_id", ""))
     if target is None:
@@ -247,7 +261,7 @@ def _handle_component(payload: dict[str, Any]) -> HttpResponse:
             logger.exception("discord_no_repo_signal_failed", workflow_id=workflow_id)
         return _ok()
 
-    if name == TERMINATE_CUSTOM_ID:
+    if name == TERMINATE_CUSTOM_ID and workflow_id:
         run_id = workflow_id  # custom_id is posthog_code_terminate_task:{run_id}
         inputs = PostHogCodeDiscordInteractivityInputs(payload=payload)
         try:

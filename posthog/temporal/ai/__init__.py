@@ -14,6 +14,7 @@ from posthog.temporal.ai.posthog_code_discord_mention import (
     create_discord_task_activity,
     enforce_discord_billing_quota_activity,
     post_discord_repo_picker_activity,
+    post_discord_workflow_failure_activity,
     prepare_discord_thread_activity,
     resolve_discord_repository_activity,
 )
@@ -110,6 +111,7 @@ AI_ACTIVITIES = [
     prepare_discord_thread_activity,
     resolve_discord_repository_activity,
     post_discord_repo_picker_activity,
+    post_discord_workflow_failure_activity,
     create_discord_task_activity,
     process_posthog_code_discord_terminate_task_activity,
     investigate_anomaly_activity,
