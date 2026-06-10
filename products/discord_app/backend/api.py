@@ -37,7 +37,7 @@ from posthog.temporal.ai.posthog_code_discord_mention import (
 )
 from posthog.temporal.common.client import sync_connect
 
-from products.discord_app.backend.models import DiscordUserLink
+from products.discord_app.backend.models import DiscordSettings, DiscordUserLink
 from products.discord_app.backend.repos import repo_autocomplete_choices
 from products.discord_app.backend.services import commands as commands_dispatch
 from products.discord_app.backend.services.integration_resolver import (
@@ -173,7 +173,10 @@ def _handle_command(payload: dict[str, Any]) -> HttpResponse:
     if integration is None:
         if not resolution.candidates:
             return _ephemeral("This server isn't connected to PostHog yet. Connect it with `/ph connect`.")
-        return _ephemeral("Multiple PostHog projects are connected. Set yours with `/ph project set <id>`.")
+        # The bot ships no project-picker command, so reconnecting is the routing escape hatch.
+        return _ephemeral(
+            "Multiple PostHog projects are connected to this server. Re-run `/ph connect` to choose which one to use."
+        )
 
     # The bot relays `/ph <subcommand>` as command=<subcommand>; the posthog-* spellings
     # predate that convention and are kept as aliases.
@@ -498,11 +501,18 @@ def discord_connect_confirm(request: HttpRequest) -> HttpResponse:
     if team is None:
         return JsonResponse({"error": "connecting requires org admin access to that project"}, status=403)
 
-    Integration.objects.update_or_create(
+    integration, _created = Integration.objects.update_or_create(
         team=team,
         kind="discord",
         integration_id=data["guild_id"],
         defaults={"created_by": request.user, "config": {"guild_name": data.get("guild_name", "")}},
+    )
+    # Last connect wins for command routing — the bot has no project-picker command, so
+    # `/ph connect` is the only routing control. Matches connect_guild's capture-key semantics.
+    DiscordSettings.objects.update_or_create(
+        guild_id=data["guild_id"],
+        discord_user_id=None,
+        defaults={"default_integration": integration},
     )
 
     # Provision analytics on the bot side — this push is what wires up guild capture.

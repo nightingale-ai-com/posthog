@@ -284,8 +284,13 @@ class TestServerConnect:
             request.user = user
             with patch.object(api, "DiscordBotClient", return_value=client):
                 assert api.discord_connect_confirm(request).status_code == 200
-        # last connect wins on the bot side
+        # last connect wins on the bot side...
         assert client.connect_guild.call_args.kwargs["project_api_key"] == team2.api_token
+        # ...and for command routing (the bot ships no project-picker command)
+        from products.discord_app.backend.models import DiscordSettings
+
+        default = DiscordSettings.objects.get(guild_id="g42", discord_user_id=None)
+        assert default.default_integration.team_id == team2.id
 
     def test_delete_last_binding_pushes_empty_key(self, settings):
         settings.DISCORD_BOT_ACTIONS_URL = "http://bot.local/actions"
