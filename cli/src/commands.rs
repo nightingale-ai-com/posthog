@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use tracing::{error, warn};
 
 use crate::{
+    debug_symbols::DebugSymbolsSubcommand,
     download::SymbolSetsSubcommand,
     dsym::DsymSubcommand,
     error::CapturedError,
@@ -66,6 +67,7 @@ fn dry_run_skipped_command(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Sourcemap { .. } => Some("sourcemap"),
         Commands::Dsym { .. } => Some("dSYM"),
+        Commands::DebugSymbols { .. } => Some("debug symbols"),
         Commands::Hermes { .. } => Some("hermes sourcemap"),
         Commands::Proguard { .. } => Some("proguard"),
         Commands::Exp { cmd } => match cmd {
@@ -100,6 +102,12 @@ pub enum Commands {
     Dsym {
         #[command(subcommand)]
         cmd: DsymSubcommand,
+    },
+
+    #[command(about = "Upload native debug symbol files (ELF) to PostHog")]
+    DebugSymbols {
+        #[command(subcommand)]
+        cmd: DebugSymbolsSubcommand,
     },
 
     #[command(about = "Upload hermes sourcemaps to PostHog")]
@@ -261,6 +269,11 @@ impl Cli {
             Commands::Dsym { cmd } => match cmd {
                 DsymSubcommand::Upload(args) => {
                     crate::dsym::upload::upload(&args)?;
+                }
+            },
+            Commands::DebugSymbols { cmd } => match cmd {
+                DebugSymbolsSubcommand::Upload(args) => {
+                    crate::debug_symbols::upload::upload(&args)?;
                 }
             },
             Commands::Hermes { cmd } => match cmd {
