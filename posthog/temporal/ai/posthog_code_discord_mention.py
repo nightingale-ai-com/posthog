@@ -450,17 +450,20 @@ def post_discord_workflow_failure_activity(
     anchor_message_id: str | None,
     message: str,
 ) -> None:
-    """Surface a failure to the user: edit the anchor in place when it exists, else post ephemerally."""
+    """Surface a failure to the user: edit the anchor in place when it exists, else post in
+    the channel. Either way, settle the deferred-interaction placeholder (token-only edits
+    target ``@original``) so "posthog is thinking…" never lingers past a failure."""
     _integration, client = _get_integration_and_client(inputs.integration_id)
+    token = inputs.interaction.get("interaction_token")
+    if token:
+        try:
+            client.edit_message(content=message, interaction_token=token)
+        except Exception:
+            logger.warning("posthog_code_discord_placeholder_edit_failed")
     if thread_id and anchor_message_id:
         client.edit_message(target_id=thread_id, message_id=anchor_message_id, content=message)
-        return
-    client.post_message(
-        target_id=thread_id or inputs.interaction.get("channel_id"),
-        content=message,
-        ephemeral=True,
-        interaction_token=inputs.interaction.get("interaction_token"),
-    )
+    elif not token:
+        client.post_message(target_id=thread_id or inputs.interaction.get("channel_id"), content=message)
 
 
 @activity.defn

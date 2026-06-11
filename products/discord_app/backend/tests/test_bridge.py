@@ -141,3 +141,29 @@ class TestBotClientOutbound:
 
         with pytest.raises(DiscordIntegrationError):
             DiscordBotClient()
+
+
+class TestPlaceholderFinalize:
+    def _handler(self, token="tok"):
+        context = DiscordThreadContext(
+            integration_id=1, channel_id="t1", thread_id="t1", anchor_message_id="a1", interaction_token=token
+        )
+        handler = DiscordThreadHandler(context)
+        handler._client = MagicMock()
+        handler._integration = MagicMock()
+        return handler, handler._client
+
+    def test_finalize_edits_original_via_token_only(self):
+        handler, client = self._handler()
+        handler.finalize_placeholder("**Task failed** ❌")
+        client.edit_message.assert_called_once_with(content="**Task failed** ❌", interaction_token="tok")
+
+    def test_finalize_noop_without_token(self):
+        handler, client = self._handler(token=None)
+        handler.finalize_placeholder("done")
+        client.edit_message.assert_not_called()
+
+    def test_finalize_swallows_expired_token_errors(self):
+        handler, client = self._handler()
+        client.edit_message.side_effect = RuntimeError("expired")
+        handler.finalize_placeholder("done")  # must not raise — token expires after ~15 min

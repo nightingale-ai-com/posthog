@@ -65,6 +65,12 @@ def post_discord_update(input: PostDiscordUpdateInput) -> None:
         )
         pr_url = (task_run.output or {}).get("pr_url")
 
+        # Settle the channel's deferred-interaction placeholder once the run is over;
+        # progress edits keep it live mid-run, but a terminal state must not leave
+        # "posthog is thinking…" dangling.
+        if task_run.is_terminal:
+            handler.finalize_placeholder(_placeholder_text_for(task_run, pr_url))
+
         if input.sandbox_cleaned:
             if pr_url:
                 handler.update_reaction("hedgehog")
@@ -107,6 +113,16 @@ def post_discord_update(input: PostDiscordUpdateInput) -> None:
             handler.post_or_update_progress(stage, task_url)
     except Exception:
         logger.exception("post_discord_update_failed", run_id=input.run_id)
+
+
+def _placeholder_text_for(task_run, pr_url: str | None) -> str:
+    from products.tasks.backend.models import TaskRun
+
+    if task_run.status == TaskRun.Status.COMPLETED:
+        return "**Pull request created** 🚀 — see the thread." if pr_url else "**Task completed** 🦔 — see the thread."
+    if task_run.status == TaskRun.Status.CANCELLED:
+        return "**Task cancelled** 🦔"
+    return "**Task failed** ❌ — details in the thread."
 
 
 def _unwatch_thread_for_run(task_run) -> None:

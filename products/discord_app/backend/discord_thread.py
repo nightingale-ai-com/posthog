@@ -184,6 +184,18 @@ class DiscordThreadHandler:
         buttons = [("Open in PostHog Code", task_url)] if task_url else []
         self._post_thread("**Sandbox stopped** 🦔", _link_button_row(buttons))
 
+    def finalize_placeholder(self, content: str) -> None:
+        """Replace the deferred interaction placeholder ("posthog is thinking…") with a
+        final status. Token-only edits target Discord's ``@original``; the token expires
+        ~15 minutes after the slash command, so this is best-effort by design.
+        """
+        if not self.context.interaction_token:
+            return
+        try:
+            self._get_client().edit_message(content=content, interaction_token=self.context.interaction_token)
+        except Exception as e:
+            logger.warning("discord_finalize_placeholder_failed", error=str(e))
+
     def delete_progress(self) -> None:
         # Progress lives on the anchor message (edited in place), so there is no separate
         # progress message to delete. No-op, kept for parity with SlackThreadHandler.
