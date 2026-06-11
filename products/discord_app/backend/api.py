@@ -24,6 +24,10 @@ from posthog.models.integration import (
 from posthog.models.organization import OrganizationMembership
 from posthog.models.team import Team
 from posthog.models.user import User
+from posthog.temporal.ai.posthog_code_discord_followup import (
+    PostHogCodeDiscordFollowupInputs,
+    PostHogCodeDiscordFollowupWorkflow,
+)
 from posthog.temporal.ai.posthog_code_discord_interactivity import (
     PostHogCodeDiscordInteractivityInputs,
     PostHogCodeDiscordTerminateTaskWorkflow,
@@ -37,7 +41,7 @@ from posthog.temporal.ai.posthog_code_discord_mention import (
 )
 from posthog.temporal.common.client import sync_connect
 
-from products.discord_app.backend.models import DiscordSettings, DiscordUserLink
+from products.discord_app.backend.models import DiscordSettings, DiscordThreadTaskMapping, DiscordUserLink
 from products.discord_app.backend.repos import repo_autocomplete_choices
 from products.discord_app.backend.services import commands as commands_dispatch
 from products.discord_app.backend.services.integration_resolver import (
@@ -130,6 +134,9 @@ def discord_interactions_ingest(request: HttpRequest) -> HttpResponse:
         return _handle_command(payload)
     if kind == "component":
         return _handle_component(payload)
+    if kind == "message":
+        # Plain replies in PostHog-managed threads, forwarded by the bot.
+        return _handle_thread_message(payload)
     if kind == "modal_submit":
         # Follow-up modal text — forwarding to a running sandbox is handled out of band.
         return _ok()
@@ -181,6 +188,16 @@ def _handle_command(payload: dict[str, Any]) -> HttpResponse:
     # The bot relays `/ph <subcommand>` as command=<subcommand>; the posthog-* spellings
     # predate that convention and are kept as aliases.
     if command in ("code", "posthog"):
+        # Inside an existing task thread, `/ph code` is a follow-up to that task —
+        # threads can't nest, so starting a fresh task there would fail anyway.
+        mapping = (
+            DiscordThreadTaskMapping.objects.unscoped()
+            .filter(guild_id=guild_id, thread_id=payload.get("channel_id") or "")
+            .select_related("integration", "task_run")
+            .first()
+        )
+        if mapping is not None:
+            return _handle_followup_command(payload, mapping, discord_user_id)
         return _handle_posthog_command(payload, integration, guild_id, discord_user_id)
     if command in ("rules", "posthog-rules"):
         return _handle_rules_command(payload, integration, discord_user_id)
@@ -218,6 +235,100 @@ def _handle_posthog_command(
     except Exception:
         logger.exception("discord_start_mention_workflow_failed", guild_id=guild_id)
         return _ephemeral("Sorry, I ran into an internal error starting the task. Please try again.")
+    return _ok()
+
+
+def _followup_display_name(user: dict[str, Any]) -> str:
+    return user.get("global_name") or user.get("username") or "A teammate"
+
+
+def _start_followup_workflow(
+    *, guild_id: str, thread_id: str, text: str, discord_user_id: str, dedupe_key: str, message_id: str | None = None
+) -> None:
+    inputs = PostHogCodeDiscordFollowupInputs(
+        guild_id=guild_id,
+        thread_id=thread_id,
+        text=text,
+        discord_user_id=discord_user_id,
+        message_id=message_id,
+    )
+    _start_workflow(
+        PostHogCodeDiscordFollowupWorkflow,
+        inputs,
+        f"posthog-code-discord-followup-{guild_id}:{dedupe_key}",
+    )
+
+
+def _handle_followup_command(payload: dict[str, Any], mapping: Any, discord_user_id: str) -> HttpResponse:
+    link = _linked_user(mapping.integration, discord_user_id)
+    if link is None:
+        url = _account_link_url(integration_id=mapping.integration_id, discord_user_id=discord_user_id)
+        return _ephemeral(f"First, link your PostHog account: {url}")
+
+    text = ((payload.get("options") or {}).get("prompt") or "").strip()
+    if not text:
+        return _ephemeral("Add a prompt: `/ph code <message for the running agent>`.")
+    if discord_user_id != mapping.discord_user_id:
+        text = f"{_followup_display_name(payload.get('user') or {})}: {text}"
+
+    try:
+        _start_followup_workflow(
+            guild_id=mapping.guild_id,
+            thread_id=mapping.thread_id,
+            text=text,
+            discord_user_id=discord_user_id,
+            dedupe_key=payload.get("interaction_id") or mapping.thread_id,
+        )
+    except Exception:
+        logger.exception("discord_followup_workflow_start_failed", thread_id=mapping.thread_id)
+        return _ephemeral("Sorry, I couldn't reach the running agent. Please try again.")
+    return _ephemeral("Sent to the running agent \U0001f440")
+
+
+def _handle_thread_message(payload: dict[str, Any]) -> HttpResponse:
+    """Forward a plain message in a PostHog-managed thread to the running agent.
+
+    Quietly ignores anything that isn't a follow-up: bot/self messages, threads we
+    don't manage, and senders who haven't linked their PostHog account.
+    """
+    user = payload.get("user") or {}
+    if user.get("bot"):
+        return _ok()
+    content = (payload.get("content") or "").strip()
+    guild_id = payload.get("guild_id") or ""
+    thread_id = payload.get("channel_id") or ""
+    if not content or not guild_id or not thread_id:
+        return _ok()
+
+    mapping = (
+        DiscordThreadTaskMapping.objects.unscoped()
+        .filter(guild_id=guild_id, thread_id=thread_id)
+        .select_related("integration")
+        .first()
+    )
+    if mapping is None:
+        return _ok()
+
+    discord_user_id = user.get("id", "")
+    if _linked_user(mapping.integration, discord_user_id) is None:
+        logger.info("discord_thread_message_unlinked_sender", thread_id=thread_id)
+        return _ok()
+
+    text = content
+    if discord_user_id != mapping.discord_user_id:
+        text = f"{_followup_display_name(user)}: {text}"
+
+    try:
+        _start_followup_workflow(
+            guild_id=guild_id,
+            thread_id=thread_id,
+            text=text,
+            discord_user_id=discord_user_id,
+            dedupe_key=payload.get("message_id") or payload.get("interaction_id") or thread_id,
+            message_id=payload.get("message_id"),
+        )
+    except Exception:
+        logger.exception("discord_thread_message_forward_failed", thread_id=thread_id)
     return _ok()
 
 

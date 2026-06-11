@@ -5,6 +5,10 @@ from posthog.temporal.ai.chat_agent import (
     process_chat_agent_activity,
     process_conversation_activity,
 )
+from posthog.temporal.ai.posthog_code_discord_followup import (
+    PostHogCodeDiscordFollowupWorkflow,
+    forward_discord_followup_activity,
+)
 from posthog.temporal.ai.posthog_code_discord_interactivity import (
     PostHogCodeDiscordTerminateTaskWorkflow,
     process_posthog_code_discord_terminate_task_activity,
@@ -78,6 +82,7 @@ AI_WORKFLOWS = [
     PostHogCodeSlackMentionCommandWorkflow,
     PostHogCodeSlackTerminateTaskWorkflow,
     PostHogCodeDiscordMentionWorkflow,
+    PostHogCodeDiscordFollowupWorkflow,
     PostHogCodeDiscordTerminateTaskWorkflow,
     AnomalyInvestigationWorkflow,
 ]
@@ -118,6 +123,7 @@ AI_ACTIVITIES = [
     post_discord_workflow_failure_activity,
     create_discord_task_activity,
     process_posthog_code_discord_terminate_task_activity,
+    forward_discord_followup_activity,
     investigate_anomaly_activity,
 ]
 

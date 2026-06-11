@@ -34,6 +34,14 @@ class TestIngestDispatch:
     def _bridge_secret(self, settings):
         settings.DISCORD_BRIDGE_SHARED_SECRET = SECRET
 
+    @pytest.fixture(autouse=True)
+    def _no_thread_mapping(self):
+        # commands in these tests run outside task threads; stub the followup lookup
+        chain = MagicMock()
+        chain.filter.return_value.select_related.return_value.first.return_value = None
+        with patch.object(api.DiscordThreadTaskMapping.objects, "unscoped", return_value=chain):
+            yield
+
     def test_unauthorized_without_bearer(self):
         request = RequestFactory().post("/api/discord/interactions/ingest", data="{}", content_type="application/json")
         assert api.discord_interactions_ingest(request).status_code == 401
@@ -301,3 +309,102 @@ class TestServerConnect:
         with patch("products.discord_app.backend.signals.DiscordBotClient", return_value=client):
             integration.delete()
         client.connect_guild.assert_called_once_with(guild_id="g42", region="us", project_api_key="")
+
+
+class TestThreadFollowups:
+    @pytest.fixture(autouse=True)
+    def _bridge_secret(self, settings):
+        settings.DISCORD_BRIDGE_SHARED_SECRET = SECRET
+
+    def _mapping(self, owner="du1"):
+        mapping = MagicMock()
+        mapping.guild_id = "g1"
+        mapping.thread_id = "t1"
+        mapping.integration_id = 7
+        mapping.discord_user_id = owner
+        return mapping
+
+    def _patch_mapping(self, mapping):
+        chain = MagicMock()
+        chain.filter.return_value.select_related.return_value.first.return_value = mapping
+        return patch.object(api.DiscordThreadTaskMapping.objects, "unscoped", return_value=chain)
+
+    def test_code_in_task_thread_forwards_as_followup(self):
+        mapping = self._mapping()
+        with (
+            patch.object(api, "load_integrations", return_value=_resolution(MagicMock(id=7))),
+            self._patch_mapping(mapping),
+            patch.object(api, "_linked_user", return_value=MagicMock(user_id=42)),
+            patch.object(api, "_start_workflow") as start,
+        ):
+            resp = api.discord_interactions_ingest(
+                _ingest_request(
+                    {
+                        "kind": "command",
+                        "command": "code",
+                        "guild_id": "g1",
+                        "channel_id": "t1",
+                        "user": {"id": "du1"},
+                        "options": {"prompt": "open a draft PR"},
+                        "interaction_id": "i9",
+                    }
+                )
+            )
+        body = json.loads(resp.content)
+        assert "Sent to the running agent" in body["content"]
+        start.assert_called_once()
+        inputs = start.call_args.args[1]
+        assert inputs.text == "open a draft PR"
+        assert inputs.thread_id == "t1"
+        assert start.call_args.args[2] == "posthog-code-discord-followup-g1:i9"
+
+    def test_plain_thread_message_forwards_for_linked_sender(self):
+        mapping = self._mapping(owner="du1")
+        with (
+            self._patch_mapping(mapping),
+            patch.object(api, "_linked_user", return_value=MagicMock(user_id=43)),
+            patch.object(api, "_start_workflow") as start,
+        ):
+            resp = api.discord_interactions_ingest(
+                _ingest_request(
+                    {
+                        "kind": "message",
+                        "guild_id": "g1",
+                        "channel_id": "t1",
+                        "user": {"id": "du2", "username": "sam", "global_name": "Sam"},
+                        "content": "use the v2 endpoint",
+                        "message_id": "m5",
+                    }
+                )
+            )
+        assert json.loads(resp.content)["status"] == "accepted"
+        inputs = start.call_args.args[1]
+        # different sender than the thread owner gets name-prefixed
+        assert inputs.text == "Sam: use the v2 endpoint"
+
+    def test_plain_thread_message_ignored_for_unlinked_or_bot(self):
+        mapping = self._mapping()
+        with (
+            self._patch_mapping(mapping),
+            patch.object(api, "_linked_user", return_value=None),
+            patch.object(api, "_start_workflow") as start,
+        ):
+            resp = api.discord_interactions_ingest(
+                _ingest_request(
+                    {"kind": "message", "guild_id": "g1", "channel_id": "t1", "user": {"id": "du9"}, "content": "hi"}
+                )
+            )
+            assert json.loads(resp.content)["status"] == "accepted"
+            resp = api.discord_interactions_ingest(
+                _ingest_request(
+                    {
+                        "kind": "message",
+                        "guild_id": "g1",
+                        "channel_id": "t1",
+                        "user": {"id": "botid", "bot": True},
+                        "content": "hi",
+                    }
+                )
+            )
+            assert json.loads(resp.content)["status"] == "accepted"
+        start.assert_not_called()
