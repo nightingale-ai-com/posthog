@@ -408,3 +408,96 @@ class TestThreadFollowups:
             )
             assert json.loads(resp.content)["status"] == "accepted"
         start.assert_not_called()
+
+
+class TestForumPosts:
+    @pytest.fixture(autouse=True)
+    def _bridge_secret(self, settings):
+        settings.DISCORD_BRIDGE_SHARED_SECRET = SECRET
+
+    def _payload(self, **overrides):
+        payload = {
+            "kind": "forum_post",
+            "guild_id": "g1",
+            "forum_channel_id": "f1",
+            "thread_id": "post1",
+            "title": "Search filter shows wrong results",
+            "content": "Filtering for non-verified games shows only a few games",
+            "tags": ["bug"],
+            "author": {"id": "community1", "username": "gamer", "bot": False},
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_forum_post_starts_triage_under_service_identity(self):
+        integration = MagicMock(id=7, created_by_id=42)
+        with (
+            patch.object(api, "load_integrations", return_value=_resolution(integration)),
+            patch.object(api, "_forum_rate_cap_exceeded", return_value=False),
+            patch.object(api, "_start_workflow") as start,
+        ):
+            resp = api.discord_interactions_ingest(_ingest_request(self._payload()))
+        assert json.loads(resp.content)["status"] == "accepted"
+        inputs = start.call_args.args[1]
+        assert inputs.user_id == 42
+        assert inputs.author_discord_user_id == "community1"
+        assert inputs.thread_id == "post1"
+        # per-thread dedupe via the workflow id
+        assert start.call_args.args[2] == "posthog-code-discord-forum-g1:post1"
+
+    @pytest.mark.parametrize(
+        "overrides,reason",
+        [
+            ({"author": {"id": "b1", "bot": True}}, "bot author"),
+        ],
+    )
+    def test_forum_post_skips(self, overrides, reason):
+        with patch.object(api, "_start_workflow") as start:
+            resp = api.discord_interactions_ingest(_ingest_request(self._payload(**overrides)))
+        assert json.loads(resp.content) == {"status": "skipped", "reason": reason}
+        start.assert_not_called()
+
+    def test_forum_post_skipped_when_unconnected_or_capped(self):
+        with (
+            patch.object(api, "load_integrations", return_value=_resolution(None)),
+            patch.object(api, "_start_workflow") as start,
+        ):
+            resp = api.discord_interactions_ingest(_ingest_request(self._payload()))
+            assert json.loads(resp.content)["reason"] == "guild not connected"
+        integration = MagicMock(id=7, created_by_id=42)
+        with (
+            patch.object(api, "load_integrations", return_value=_resolution(integration)),
+            patch.object(api, "_forum_rate_cap_exceeded", return_value=True),
+            patch.object(api, "_start_workflow") as start,
+        ):
+            resp = api.discord_interactions_ingest(_ingest_request(self._payload()))
+            assert json.loads(resp.content)["reason"] == "rate capped"
+        start.assert_not_called()
+
+    def test_thread_owner_can_followup_without_linked_account(self):
+        mapping = MagicMock()
+        mapping.guild_id = "g1"
+        mapping.thread_id = "post1"
+        mapping.discord_user_id = "community1"
+        chain = MagicMock()
+        chain.filter.return_value.select_related.return_value.first.return_value = mapping
+        with (
+            patch.object(api.DiscordThreadTaskMapping.objects, "unscoped", return_value=chain),
+            patch.object(api, "_linked_user", return_value=None) as linked,
+            patch.object(api, "_start_workflow") as start,
+        ):
+            resp = api.discord_interactions_ingest(
+                _ingest_request(
+                    {
+                        "kind": "message",
+                        "guild_id": "g1",
+                        "channel_id": "post1",
+                        "user": {"id": "community1", "username": "gamer"},
+                        "content": "it happens on the search tab too",
+                        "message_id": "m9",
+                    }
+                )
+            )
+        assert json.loads(resp.content)["status"] == "accepted"
+        start.assert_called_once()
+        linked.assert_not_called()  # owner carve-out short-circuits the link check

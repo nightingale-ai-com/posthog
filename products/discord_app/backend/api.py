@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core import signing
+from django.core.cache import cache
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect, JsonResponse
 from django.middleware.csrf import get_token
 from django.utils.html import escape
@@ -27,6 +28,11 @@ from posthog.models.user import User
 from posthog.temporal.ai.posthog_code_discord_followup import (
     PostHogCodeDiscordFollowupInputs,
     PostHogCodeDiscordFollowupWorkflow,
+)
+from posthog.temporal.ai.posthog_code_discord_forum import (
+    PostHogCodeDiscordForumInputs,
+    PostHogCodeDiscordForumTriageWorkflow,
+    derive_discord_forum_workflow_id,
 )
 from posthog.temporal.ai.posthog_code_discord_interactivity import (
     PostHogCodeDiscordInteractivityInputs,
@@ -137,6 +143,9 @@ def discord_interactions_ingest(request: HttpRequest) -> HttpResponse:
     if kind == "message":
         # Plain replies in PostHog-managed threads, forwarded by the bot.
         return _handle_thread_message(payload)
+    if kind == "forum_post":
+        # New posts in watched forum channels — automatic triage.
+        return _handle_forum_post(payload)
     if kind == "modal_submit":
         # Follow-up modal text — forwarding to a running sandbox is handled out of band.
         return _ok()
@@ -310,7 +319,10 @@ def _handle_thread_message(payload: dict[str, Any]) -> HttpResponse:
         return _ok()
 
     discord_user_id = user.get("id", "")
-    if _linked_user(mapping.integration, discord_user_id) is None:
+    # The thread owner may reply without a linked account: forum-triage threads belong to
+    # community members, and the task already runs under the connecting user's identity.
+    is_thread_owner = discord_user_id and discord_user_id == mapping.discord_user_id
+    if not is_thread_owner and _linked_user(mapping.integration, discord_user_id) is None:
         logger.info("discord_thread_message_unlinked_sender", thread_id=thread_id)
         return _ok()
 
@@ -329,6 +341,74 @@ def _handle_thread_message(payload: dict[str, Any]) -> HttpResponse:
         )
     except Exception:
         logger.exception("discord_thread_message_forward_failed", thread_id=thread_id)
+    return _ok()
+
+
+def _forum_rate_cap_exceeded(guild_id: str) -> bool:
+    """Per-guild hourly cap on automatic forum triages — a post flood must not drain
+    AI credits. Sliding hour bucket in the cache; fail open if the cache is down."""
+    try:
+        key = f"discord_app:forum_triage_cap:{guild_id}"
+        count = cache.get_or_set(key, 0, timeout=3600)
+        if count >= settings.DISCORD_FORUM_TRIAGE_HOURLY_CAP:
+            return True
+        try:
+            cache.incr(key)
+        except ValueError:
+            cache.set(key, 1, timeout=3600)
+        return False
+    except Exception:
+        logger.exception("discord_forum_cap_check_failed", guild_id=guild_id)
+        return False
+
+
+def _handle_forum_post(payload: dict[str, Any]) -> HttpResponse:
+    """Kick off automatic triage for a new forum post. The author is a community member,
+    so the task runs under the service identity of whoever connected the guild."""
+    author = payload.get("author") or {}
+    if author.get("bot"):
+        return JsonResponse({"status": "skipped", "reason": "bot author"})
+
+    guild_id = payload.get("guild_id") or ""
+    thread_id = payload.get("thread_id") or ""
+    if not guild_id or not thread_id:
+        return JsonResponse({"error": "bad request"}, status=400)
+
+    resolution = load_integrations(guild_id=guild_id)
+    integration = resolution.integration
+    if integration is None:
+        return JsonResponse({"status": "skipped", "reason": "guild not connected"})
+
+    service_user_id = integration.created_by_id
+    if service_user_id is None:
+        logger.warning("discord_forum_post_no_service_identity", guild_id=guild_id)
+        return JsonResponse({"status": "skipped", "reason": "no service identity"})
+
+    if _forum_rate_cap_exceeded(guild_id):
+        logger.warning("discord_forum_post_rate_capped", guild_id=guild_id, thread_id=thread_id)
+        return JsonResponse({"status": "skipped", "reason": "rate capped"})
+
+    inputs = PostHogCodeDiscordForumInputs(
+        integration_id=integration.id,
+        guild_id=guild_id,
+        forum_channel_id=payload.get("forum_channel_id") or "",
+        thread_id=thread_id,
+        title=payload.get("title") or "",
+        content=payload.get("content") or "",
+        user_id=service_user_id,
+        author_discord_user_id=author.get("id", ""),
+        tags=[t for t in (payload.get("tags") or []) if isinstance(t, str)],
+    )
+    try:
+        # Workflow id is keyed on the thread, so bot retries and duplicate events no-op.
+        _start_workflow(
+            PostHogCodeDiscordForumTriageWorkflow,
+            inputs,
+            derive_discord_forum_workflow_id(guild_id, thread_id),
+        )
+    except Exception:
+        logger.exception("discord_forum_workflow_start_failed", guild_id=guild_id, thread_id=thread_id)
+        return JsonResponse({"error": "failed to start triage"}, status=503)
     return _ok()
 
 

@@ -9,6 +9,14 @@ from posthog.temporal.ai.posthog_code_discord_followup import (
     PostHogCodeDiscordFollowupWorkflow,
     forward_discord_followup_activity,
 )
+from posthog.temporal.ai.posthog_code_discord_forum import (
+    PostHogCodeDiscordForumTriageWorkflow,
+    check_discord_forum_quota_activity,
+    create_forum_triage_task_activity,
+    discover_forum_repository_activity,
+    post_forum_anchor_activity,
+    post_forum_failure_activity,
+)
 from posthog.temporal.ai.posthog_code_discord_interactivity import (
     PostHogCodeDiscordTerminateTaskWorkflow,
     process_posthog_code_discord_terminate_task_activity,
@@ -83,6 +91,7 @@ AI_WORKFLOWS = [
     PostHogCodeSlackTerminateTaskWorkflow,
     PostHogCodeDiscordMentionWorkflow,
     PostHogCodeDiscordFollowupWorkflow,
+    PostHogCodeDiscordForumTriageWorkflow,
     PostHogCodeDiscordTerminateTaskWorkflow,
     AnomalyInvestigationWorkflow,
 ]
@@ -124,6 +133,11 @@ AI_ACTIVITIES = [
     create_discord_task_activity,
     process_posthog_code_discord_terminate_task_activity,
     forward_discord_followup_activity,
+    check_discord_forum_quota_activity,
+    post_forum_anchor_activity,
+    discover_forum_repository_activity,
+    create_forum_triage_task_activity,
+    post_forum_failure_activity,
     investigate_anomaly_activity,
 ]
 

@@ -48,6 +48,8 @@ DISCORD_BRIDGE_SHARED_SECRET = get_from_env("DISCORD_BRIDGE_SHARED_SECRET", "")
 # (`bot applications.commands` scopes via the shared integrations OAuth flow).
 DISCORD_APP_CLIENT_ID = get_from_env("DISCORD_APP_CLIENT_ID", "")
 DISCORD_APP_CLIENT_SECRET = get_from_env("DISCORD_APP_CLIENT_SECRET", "")
+# Per-guild hourly cap on automatic forum-post triages (each one is a sandbox + LLM run).
+DISCORD_FORUM_TRIAGE_HOURLY_CAP = get_from_env("DISCORD_FORUM_TRIAGE_HOURLY_CAP", 10, type_cast=int)
 
 ZENDESK_ADMIN_EMAIL = get_from_env("ZENDESK_ADMIN_EMAIL", "")
 ZENDESK_API_TOKEN = get_from_env("ZENDESK_API_TOKEN", "")
