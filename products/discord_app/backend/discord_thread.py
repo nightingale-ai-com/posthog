@@ -151,14 +151,14 @@ class DiscordThreadHandler:
     def post_pr_opened_sandbox_cleaned(self, pr_url: str, task_url: str | None) -> None:
         buttons = [("View PR", pr_url)]
         if task_url:
-            buttons.append(("Open in PostHog Code", task_url))
+            buttons.append(("Open in PostHog", task_url))
         self._post_thread("**Pull request opened** 🚀", _link_button_row(buttons))
 
     def post_pr_opened(self, pr_url: str, task_url: str | None) -> None:
         mention = f"<@{self.context.discord_user_id}> " if self.context.discord_user_id else ""
         buttons = [("View PR", pr_url)]
         if task_url:
-            buttons.append(("Open in PostHog Code", task_url))
+            buttons.append(("Open in PostHog", task_url))
         self._post_thread(f"{mention}Pull request opened.", _link_button_row(buttons))
 
     def post_thread_message(self, text: str) -> None:
@@ -170,18 +170,18 @@ class DiscordThreadHandler:
         if pr_url:
             buttons.append(("View PR", pr_url))
         if task_url:
-            buttons.append(("Open in PostHog Code", task_url))
+            buttons.append(("Open in PostHog", task_url))
         self._post_thread(header, _link_button_row(buttons))
 
     def post_error(self, error: str, task_url: str | None) -> None:
         error = _format_task_error(error)
         truncated = error[:200]
         content = f"**Task failed** ❌\n{truncated}"
-        buttons = [("See details in PostHog Code", task_url)] if task_url else []
+        buttons = [("See details in PostHog", task_url)] if task_url else []
         self._post_thread(content, _link_button_row(buttons))
 
     def post_cancelled(self, task_url: str | None) -> None:
-        buttons = [("Open in PostHog Code", task_url)] if task_url else []
+        buttons = [("Open in PostHog", task_url)] if task_url else []
         self._post_thread("**Sandbox stopped** 🦔", _link_button_row(buttons))
 
     def finalize_placeholder(self, content: str) -> None:
