@@ -172,6 +172,30 @@ export interface SignalScoutConfigApi {
 }
 
 /**
+ * Request body for registering a scout config without waiting for the coordinator tick.
+ *
+ * Upsert keyed on `skill_name`: if the coordinator (or a concurrent caller) already
+ * registered the row, the provided tunables are applied to it instead.
+ */
+export interface SignalScoutConfigCreateApi {
+    /**
+     * The `signals-scout-*` skill to register a config for. The skill must already exist on this project — author it via the skills store first.
+     * @maxLength 200
+     */
+    skill_name: string
+    /** Whether this scout runs on its schedule. Defaults to true. */
+    enabled?: boolean
+    /** Whether the scout writes findings to the inbox. False = dry-run: it runs and logs but emits nothing. Defaults to true. */
+    emit?: boolean
+    /**
+     * Minutes between runs (10–43200). Defaults to 60 (hourly).
+     * @minimum 10
+     * @maximum 43200
+     */
+    run_interval_minutes?: number
+}
+
+/**
  * Per-(team, skill) scout config: schedule, enablement, and emit posture.
  *
  * One row per `signals-scout-*` skill on the team. The coordinator auto-creates a row
@@ -909,6 +933,8 @@ export interface SignalScoutEmissionApi {
      * * `P3` - P3
      * * `P4` - P4 */
     severity: AutonomyPriorityEnumApi | null
+    /** Slug tags the scout attached to this finding (lowercase kebab-case, e.g. `cost-spike`). Empty list when the run set none. */
+    tags: string[]
     /** Deterministic `run:<run_id>:finding:<finding_id>` — the join key into the underlying signal store. */
     source_id: string
     /** ISO-8601 timestamp the finding was emitted. */
@@ -972,6 +998,12 @@ export interface EmitFindingRequestApi {
     severity?: AutonomyPriorityEnumApi | null
     /** Optional keys for downstream dedupe (e.g. `error_tracking_issue:<id>`). */
     dedupe_keys?: string[]
+    /**
+     * Optional category tags as lowercase kebab-case slugs (e.g. `cost-spike`, `silent-failure`), max 10. Reuse the vocabulary in your `tags:<domain>:taxonomy` scratchpad entry when a tag fits; coin a new slug when a genuinely new category emerges. Near-miss formats are normalized to slugs; persisted in the signal's `extra.tags` and on the emission row.
+     * @maxItems 10
+     * @items.maxLength 50
+     */
+    tags?: string[]
     /** Optional time window the finding refers to. */
     time_range?: TimeRangeApi | null
     /**
