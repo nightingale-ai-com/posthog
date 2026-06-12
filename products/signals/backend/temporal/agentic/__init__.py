@@ -24,21 +24,22 @@ def get_or_create_signals_sandbox_env(
 ) -> str:
     """Get or create the internal SandboxEnvironment for a Signals agent. Returns the env ID as a string.
 
-    Reasserts the expected policy on every call, so manual edits via the API are
-    corrected on the next run. The lookup is scoped to ``internal=True`` so that a
-    user-created environment that happens to share the name is never clobbered, and
-    so it is isolated by the partial unique constraint on ``(team, name)``.
+    Reasserts the expected policy (including ``internal=True``) on every call, so
+    manual edits via the API are corrected on the next run.
 
-    The constraint makes ``update_or_create`` race-safe: concurrent signal-report
-    workflows that lose the create race get an IntegrityError, which Django catches
-    internally and resolves by re-fetching the winner's row. (Before the constraint
-    existed, the get-then-create window could leave duplicates that broke every
-    later lookup with ``MultipleObjectsReturned``; the dedupe migration cleared
-    those and the constraint prevents new ones.)
+    The lookup is keyed on ``(team, name)`` to match the unique constraint, which
+    makes ``update_or_create`` race-safe: concurrent signal-report workflows that
+    lose the create race get an IntegrityError, which Django catches internally and
+    resolves by re-fetching the winner's row. (Before the constraint existed, the
+    get-then-create window could leave duplicates that broke every later lookup with
+    ``MultipleObjectsReturned``; the dedupe migration cleared those and the
+    constraint prevents new ones.) The Signals env names are reserved system names,
+    so a collision with a user-created environment is not a concern in practice.
     """
     defaults: dict = {
         "network_access_level": network_access_level,
         "private": False,
+        "internal": True,
     }
     if allowed_domains is not None:
         defaults["allowed_domains"] = allowed_domains
@@ -47,7 +48,6 @@ def get_or_create_signals_sandbox_env(
     env, _ = SandboxEnvironment.objects.update_or_create(
         team_id=team_id,
         name=name,
-        internal=True,
         defaults=defaults,
     )
     return str(env.id)

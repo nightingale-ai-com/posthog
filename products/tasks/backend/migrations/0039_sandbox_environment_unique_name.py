@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ("tasks", "0038_dedupe_internal_sandbox_environments"),
+        ("tasks", "0038_dedupe_sandbox_environments"),
     ]
 
     operations = [
@@ -18,18 +18,16 @@ class Migration(migrations.Migration):
                     model_name="sandboxenvironment",
                     constraint=models.UniqueConstraint(
                         fields=["team", "name"],
-                        condition=models.Q(internal=True),
-                        name="unique_internal_sandbox_env_per_team_name",
+                        name="unique_sandbox_env_per_team_name",
                     ),
                 ),
             ],
             database_operations=[
                 CreateIndexConcurrently(
-                    index_name="unique_internal_sandbox_env_per_team_name",
+                    index_name="unique_sandbox_env_per_team_name",
                     table_name="posthog_sandbox_environment",
                     columns="(team_id, name)",
                     unique=True,
-                    where="WHERE internal",
                 ),
             ],
         ),

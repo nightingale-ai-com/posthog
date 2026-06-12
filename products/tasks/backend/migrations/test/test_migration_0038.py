@@ -8,9 +8,9 @@ from posthog.test.base import NonAtomicTestMigrations
 pytestmark = pytest.mark.skip("historical migration tests slow overall test run")
 
 
-class DedupeInternalSandboxEnvironmentsMigrationTest(NonAtomicTestMigrations):
+class DedupeSandboxEnvironmentsMigrationTest(NonAtomicTestMigrations):
     migrate_from = "0037_codeworkflowconfig_codeprsnapshot_codeworkstream"
-    migrate_to = "0038_dedupe_internal_sandbox_environments"
+    migrate_to = "0038_dedupe_sandbox_environments"
 
     CLASS_DATA_LEVEL_SETUP = False
 
@@ -53,44 +53,37 @@ class DedupeInternalSandboxEnvironmentsMigrationTest(NonAtomicTestMigrations):
         team = Team.objects.create(organization=org, project=project, name="Test Team")
         self.team_id = team.id
 
-        # At migration state 0037 the partial unique constraint does not exist yet,
-        # so we can insert the duplicate internal rows that the race produced.
-        self.keeper = SandboxEnvironment.objects.create(team=team, name="SIGNALS_REPO_DISCOVERY", internal=True)
-        SandboxEnvironment.objects.filter(id=self.keeper.id).update(created_at="2024-01-01T00:00:00Z")
-        self.surplus = SandboxEnvironment.objects.create(team=team, name="SIGNALS_REPO_DISCOVERY", internal=True)
-        SandboxEnvironment.objects.filter(id=self.surplus.id).update(created_at="2024-02-01T00:00:00Z")
+        # At migration state 0037 there is no unique constraint yet, so we can insert
+        # the duplicate rows the race / unvalidated API produced — both an internal
+        # group and a user-created group.
+        def make(name, internal, created_at):
+            env = SandboxEnvironment.objects.create(team=team, name=name, internal=internal)
+            SandboxEnvironment.objects.filter(id=env.id).update(created_at=created_at)
+            return env
 
-        # A non-internal env sharing the name and a distinct internal env must be untouched.
-        self.user_env = SandboxEnvironment.objects.create(team=team, name="SIGNALS_REPO_DISCOVERY", internal=False)
-        self.other_internal = SandboxEnvironment.objects.create(
-            team=team, name="SIGNALS_REPORT_RESEARCH", internal=True
-        )
+        self.internal_old = make("SIGNALS_REPO_DISCOVERY", True, "2024-01-01T00:00:00Z")
+        self.internal_new = make("SIGNALS_REPO_DISCOVERY", True, "2024-02-01T00:00:00Z")
+        self.user_old = make("staging", False, "2024-01-01T00:00:00Z")
+        self.user_new = make("staging", False, "2024-02-01T00:00:00Z")
+        self.singleton = make("prod", False, "2024-01-01T00:00:00Z")
 
-        task = Task.objects.create(
-            team=team,
-            title="Signal report",
-            description="",
-            origin_product="signal_report",
-        )
+        task = Task.objects.create(team=team, title="t", description="", origin_product="signal_report")
         self.run = TaskRun.objects.create(
-            task=task,
-            team=team,
-            state={"sandbox_environment_id": str(self.surplus.id)},
+            task=task, team=team, state={"sandbox_environment_id": str(self.internal_old.id)}
         )
 
-    def test_keeps_oldest_internal_row(self):
+    def test_keeps_most_recent_row_per_group(self):
         SandboxEnvironment = self.apps.get_model("tasks", "SandboxEnvironment")
-        survivors = SandboxEnvironment.objects.filter(
-            team_id=self.team_id, name="SIGNALS_REPO_DISCOVERY", internal=True
-        )
-        self.assertEqual(list(survivors.values_list("id", flat=True)), [self.keeper.id])
+        internal = SandboxEnvironment.objects.filter(team_id=self.team_id, name="SIGNALS_REPO_DISCOVERY")
+        user = SandboxEnvironment.objects.filter(team_id=self.team_id, name="staging")
+        self.assertEqual(list(internal.values_list("id", flat=True)), [self.internal_new.id])
+        self.assertEqual(list(user.values_list("id", flat=True)), [self.user_new.id])
 
     def test_repoints_references_to_keeper(self):
         TaskRun = self.apps.get_model("tasks", "TaskRun")
         run = TaskRun.objects.get(id=self.run.id)
-        self.assertEqual(run.state["sandbox_environment_id"], str(self.keeper.id))
+        self.assertEqual(run.state["sandbox_environment_id"], str(self.internal_new.id))
 
-    def test_leaves_non_internal_and_distinct_internal_rows_untouched(self):
+    def test_leaves_singleton_untouched(self):
         SandboxEnvironment = self.apps.get_model("tasks", "SandboxEnvironment")
-        self.assertTrue(SandboxEnvironment.objects.filter(id=self.user_env.id).exists())
-        self.assertTrue(SandboxEnvironment.objects.filter(id=self.other_internal.id).exists())
+        self.assertTrue(SandboxEnvironment.objects.filter(id=self.singleton.id).exists())

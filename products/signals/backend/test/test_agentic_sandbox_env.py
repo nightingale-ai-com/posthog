@@ -1,9 +1,6 @@
 from posthog.test.base import BaseTest
 
-from products.signals.backend.temporal.agentic import (
-    SIGNALS_REPO_DISCOVERY_ENV_NAME,
-    get_or_create_signals_sandbox_env,
-)
+from products.signals.backend.temporal.agentic import SIGNALS_REPO_DISCOVERY_ENV_NAME, get_or_create_signals_sandbox_env
 from products.tasks.backend.models import SandboxEnvironment
 
 
@@ -42,23 +39,3 @@ class TestGetOrCreateSignalsSandboxEnv(BaseTest):
         # The policy is reasserted on every call.
         env = SandboxEnvironment.objects.get(id=second)
         self.assertEqual(env.network_access_level, SandboxEnvironment.NetworkAccessLevel.FULL)
-
-    def test_does_not_clobber_non_internal_environment_with_same_name(self):
-        user_env = SandboxEnvironment.objects.create(
-            team=self.team,
-            created_by=self.user,
-            name=SIGNALS_REPO_DISCOVERY_ENV_NAME,
-            internal=False,
-            private=True,
-        )
-
-        env_id = get_or_create_signals_sandbox_env(
-            self.team.id,
-            SIGNALS_REPO_DISCOVERY_ENV_NAME,
-            SandboxEnvironment.NetworkAccessLevel.TRUSTED,
-        )
-
-        self.assertNotEqual(str(user_env.id), env_id)
-        user_env.refresh_from_db()
-        self.assertFalse(user_env.internal)
-        self.assertTrue(user_env.private)

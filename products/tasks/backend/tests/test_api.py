@@ -6511,7 +6511,7 @@ class TestSandboxEnvironmentAPI(BaseTaskAPITest):
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_two_users_can_create_same_named_private_environment(self):
+    def test_create_rejects_name_used_by_another_users_private_environment(self):
         other_user = User.objects.create_user(email="dup-priv@example.com", first_name="Other", password="password")
         self.organization.members.add(other_user)
         SandboxEnvironment.objects.create(team=self.team, name="Mine", private=True, created_by=other_user)
@@ -6521,14 +6521,25 @@ class TestSandboxEnvironmentAPI(BaseTaskAPITest):
             {"name": "Mine", "network_access_level": "full"},
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_create_allows_name_matching_internal_environment(self):
+    def test_create_rejects_name_matching_internal_environment(self):
         SandboxEnvironment.objects.create(team=self.team, name="Reserved", internal=True, private=False)
 
         response = self.client.post(
             self.base_url,
             {"name": "Reserved", "network_access_level": "full"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_create_allows_same_name_in_different_team(self):
+        other_team = Team.objects.create(organization=self.organization, name="Other Team")
+        SandboxEnvironment.objects.create(team=other_team, name="Cross", created_by=self.user)
+
+        response = self.client.post(
+            self.base_url,
+            {"name": "Cross", "network_access_level": "full"},
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)

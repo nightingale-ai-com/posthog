@@ -1250,15 +1250,13 @@ class SandboxEnvironment(UUIDModel):
             models.Index(fields=["team", "created_by"]),
         ]
         constraints = [
-            # Internal environments (e.g. the Signals pipeline) are looked up by
-            # (team, name) and must be unique, otherwise a get-or-create race can
-            # leave duplicates that break every subsequent lookup. User-created
-            # (non-internal) environments may legitimately share names, so the
-            # constraint is partial.
+            # Environment names are unique per team. This both prevents a team from
+            # ending up with two indistinguishable environments and closes the
+            # get-or-create race that could leave duplicate internal (Signals)
+            # environments and break every subsequent lookup.
             models.UniqueConstraint(
                 fields=["team", "name"],
-                condition=models.Q(internal=True),
-                name="unique_internal_sandbox_env_per_team_name",
+                name="unique_sandbox_env_per_team_name",
             ),
         ]
 
