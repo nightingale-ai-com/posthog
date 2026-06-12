@@ -598,6 +598,36 @@ describe('taskDetailSceneLogic', () => {
             logic.unmount()
         })
 
+        it('exhausts the reconnect budget when connections die immediately instead of looping forever', async () => {
+            jest.useFakeTimers()
+            const run = createMockRun('run-1', TaskRunStatus.IN_PROGRESS)
+            global.fetch = createFetchMock({
+                runs: { [run.id]: run },
+                // Initial connection plus MAX_STREAM_RECONNECTS retries, all dying instantly.
+                // None lives past STREAM_MIN_HEALTHY_CONNECTION_MS, so the budget never resets.
+                streamResponses: Array.from({ length: 7 }, () => createSseResponse([])),
+            })
+
+            const logic = taskDetailSceneLogic({ taskId: 'task-123' })
+            logic.mount()
+            await jest.advanceTimersByTimeAsync(0)
+
+            logic.actions.setSelectedRunId(run.id, 'task-123')
+            await jest.advanceTimersByTimeAsync(0)
+
+            // Walk through every reconnect backoff: 1s, 2s, 4s, 8s, then capped at 15s.
+            for (const backoffMs of [1000, 2000, 4000, 8000, 15000, 15000]) {
+                await jest.advanceTimersByTimeAsync(backoffMs)
+                await jest.advanceTimersByTimeAsync(0)
+            }
+
+            expect(streamFetchCalls()).toHaveLength(7)
+            expect(logic.values.streamingFailed).toBe(true)
+            expect(logic.values.isStreaming).toBe(false)
+
+            logic.unmount()
+        })
+
         it('does not restart an active stream when selected run reloads', async () => {
             const run = createMockRun('run-1', TaskRunStatus.IN_PROGRESS)
             global.fetch = createFetchMock({

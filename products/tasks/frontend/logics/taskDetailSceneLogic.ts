@@ -38,6 +38,9 @@ const LOG_POLL_INTERVAL_MS = 1000
 const MAX_STREAM_RECONNECTS = 6
 const STREAM_RECONNECT_BASE_MS = 1000
 const STREAM_RECONNECT_MAX_MS = 15000
+// A connection must stay open this long before a later drop earns a fresh reconnect
+// budget. Resetting on every open would let a rapid open-and-die loop reconnect forever.
+const STREAM_MIN_HEALTHY_CONNECTION_MS = 5000
 // "Run is complete" terminal event. Named COMPLETE (not END) because connection-rotation
 // work introduces a separate `end` event that means "reconnect", the opposite semantics.
 const STREAM_COMPLETE_EVENT = 'stream-end'
@@ -470,6 +473,7 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                 let eventIndex = values.streamEntries.length
                 let reconnectCount = 0
                 let tokenRefreshes = 0
+                let openedAt = 0
                 let terminated = false
                 let disposed = false
 
@@ -509,8 +513,7 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                             signal: abortController.signal,
                             headers: { ...target.headers, ...(resumeId ? { 'Last-Event-ID': resumeId } : {}) },
                             onOpen: () => {
-                                reconnectCount = 0
-                                tokenRefreshes = 0
+                                openedAt = Date.now()
                             },
                             onMessage: (message) => {
                                 if (terminated) {
@@ -539,6 +542,14 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                                 if (terminated || disposed) {
                                     throw error
                                 }
+                                // Only a connection that stayed healthy earns fresh budgets; this
+                                // runs before the 4xx check so a mid-stream token expiry on a
+                                // long-lived connection refreshes with a clean slate.
+                                if (openedAt > 0 && Date.now() - openedAt >= STREAM_MIN_HEALTHY_CONNECTION_MS) {
+                                    reconnectCount = 0
+                                    tokenRefreshes = 0
+                                }
+                                openedAt = 0
                                 const status = (error as { status?: number } | undefined)?.status
                                 if (typeof status === 'number' && status >= 400 && status < 500) {
                                     throw error
