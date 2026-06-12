@@ -3,6 +3,7 @@ import binascii
 from zoneinfo import available_timezones
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from croniter import croniter
@@ -1677,6 +1678,25 @@ class SandboxEnvironmentSerializer(serializers.ModelSerializer):
 
     def get_has_environment_variables(self, obj: SandboxEnvironment) -> bool:
         return bool(obj.environment_variables)
+
+    def validate_name(self, value: str) -> str:
+        # Names must be unique among the environments the creator can see (their own
+        # plus team-public ones), so a team never ends up with two indistinguishable
+        # environments. Internal envs are managed by the platform and excluded here.
+        team = self.context["team"]
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+
+        visible = Q(private=False)
+        if user is not None and user.is_authenticated:
+            visible |= Q(created_by=user)
+
+        existing = SandboxEnvironment.objects.filter(team=team, name=value, internal=False).filter(visible)
+        if self.instance is not None:
+            existing = existing.exclude(pk=self.instance.pk)
+        if existing.exists():
+            raise serializers.ValidationError("A sandbox environment with this name already exists.")
+        return value
 
     def validate_environment_variables(self, value):
         if value:
