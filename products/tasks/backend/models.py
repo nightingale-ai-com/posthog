@@ -1249,6 +1249,18 @@ class SandboxEnvironment(UUIDModel):
         indexes = [
             models.Index(fields=["team", "created_by"]),
         ]
+        constraints = [
+            # Internal environments (e.g. the Signals pipeline) are looked up by
+            # (team, name) and must be unique, otherwise a get-or-create race can
+            # leave duplicates that break every subsequent lookup. User-created
+            # (non-internal) environments may legitimately share names, so the
+            # constraint is partial.
+            models.UniqueConstraint(
+                fields=["team", "name"],
+                condition=models.Q(internal=True),
+                name="unique_internal_sandbox_env_per_team_name",
+            ),
+        ]
 
     def is_accessible_for_task_creator(self, task_created_by_id: int | None) -> bool:
         if not self.private:
