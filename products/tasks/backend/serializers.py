@@ -1679,8 +1679,7 @@ class SandboxEnvironmentSerializer(serializers.ModelSerializer):
         return bool(obj.environment_variables)
 
     def validate_name(self, value: str) -> str:
-        # Environment names are unique per team (enforced by a DB constraint). Check
-        # here too so the API returns a clean 400 instead of an IntegrityError.
+        # Surface the per-team name uniqueness as a 400 rather than a DB IntegrityError.
         team = self.context["team"]
         existing = SandboxEnvironment.objects.filter(team=team, name=value)
         if self.instance is not None:

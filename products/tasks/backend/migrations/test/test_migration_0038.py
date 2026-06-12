@@ -53,9 +53,7 @@ class DedupeSandboxEnvironmentsMigrationTest(NonAtomicTestMigrations):
         team = Team.objects.create(organization=org, project=project, name="Test Team")
         self.team_id = team.id
 
-        # At migration state 0037 there is no unique constraint yet, so we can insert
-        # the duplicate rows the race / unvalidated API produced — both an internal
-        # group and a user-created group.
+        # No unique constraint at state 0037, so duplicates can be inserted directly.
         def make(name, internal, created_at):
             env = SandboxEnvironment.objects.create(team=team, name=name, internal=internal)
             SandboxEnvironment.objects.filter(id=env.id).update(created_at=created_at)

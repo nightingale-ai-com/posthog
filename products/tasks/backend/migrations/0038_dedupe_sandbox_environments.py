@@ -1,24 +1,19 @@
 from django.db import migrations
 from django.db.models import Count
 
-# Tuned small so each batch holds short-lived locks and bounded memory.
+# Kept small so each batch holds only short-lived locks and bounded memory.
 GROUP_BATCH = 100
 REF_BATCH = 500
 DELETE_BATCH = 500
 
 
 def dedupe_sandbox_environments(apps, schema_editor):
-    """Collapse duplicate sandbox environments down to the most recent per (team, name).
+    """Collapse duplicate (team, name) sandbox environments to the most recent row.
 
-    Names become unique per team in the following migration, so any pre-existing
-    duplicates (from the get-or-create race, or from the API never validating names)
-    must be resolved first. Keep the most recently created row, repoint any
-    TaskRun.state references off the surplus rows, and delete them.
-
-    Batched and non-atomic: duplicate groups are processed in chunks and each
-    delete/repoint commits independently, so the migration never holds a long lock
-    or pulls the whole table into memory. Idempotent: once every (team, name) has a
-    single row there are no groups left and the loop exits.
+    Required before the unique constraint can be added. Repoints TaskRun.state
+    references off the surplus rows, then deletes them. Batched and non-atomic so it
+    holds only short-lived locks and never loads the whole table into memory;
+    idempotent.
     """
     SandboxEnvironment = apps.get_model("tasks", "SandboxEnvironment")
     TaskRun = apps.get_model("tasks", "TaskRun")
@@ -43,9 +38,8 @@ def dedupe_sandbox_environments(apps, schema_editor):
             surplus_ids = row_ids[1:]
             surplus_str = [str(env_id) for env_id in surplus_ids]
 
-            # Repoint references (TaskRun.state JSON; there are no DB FKs to this
-            # model) a batch of runs at a time. Updated runs no longer match the
-            # filter, so the loop drains them.
+            # TaskRun.state JSON holds the only references (no DB FK). Updated runs
+            # stop matching the filter, so the loop drains them a batch at a time.
             while True:
                 run_ids = list(
                     TaskRun.objects.filter(state__sandbox_environment_id__in=surplus_str).values_list("id", flat=True)[

@@ -22,19 +22,11 @@ def get_or_create_signals_sandbox_env(
     allowed_domains: list[str] | None = None,
     include_default_domains: bool = False,
 ) -> str:
-    """Get or create the internal SandboxEnvironment for a Signals agent. Returns the env ID as a string.
+    """Get or create the internal SandboxEnvironment named ``name`` for a team. Returns the env ID.
 
     Reasserts the expected policy (including ``internal=True``) on every call, so
-    manual edits via the API are corrected on the next run.
-
-    The lookup is keyed on ``(team, name)`` to match the unique constraint, which
-    makes ``update_or_create`` race-safe: concurrent signal-report workflows that
-    lose the create race get an IntegrityError, which Django catches internally and
-    resolves by re-fetching the winner's row. (Before the constraint existed, the
-    get-then-create window could leave duplicates that broke every later lookup with
-    ``MultipleObjectsReturned``; the dedupe migration cleared those and the
-    constraint prevents new ones.) The Signals env names are reserved system names,
-    so a collision with a user-created environment is not a concern in practice.
+    manual edits via the API are corrected on the next run. Keyed on ``(team, name)``
+    to match the unique constraint, which keeps concurrent calls race-safe.
     """
     defaults: dict = {
         "network_access_level": network_access_level,

@@ -1250,10 +1250,6 @@ class SandboxEnvironment(UUIDModel):
             models.Index(fields=["team", "created_by"]),
         ]
         constraints = [
-            # Environment names are unique per team. This both prevents a team from
-            # ending up with two indistinguishable environments and closes the
-            # get-or-create race that could leave duplicate internal (Signals)
-            # environments and break every subsequent lookup.
             models.UniqueConstraint(
                 fields=["team", "name"],
                 name="unique_sandbox_env_per_team_name",
