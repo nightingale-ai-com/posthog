@@ -9,8 +9,9 @@
 #   docker build -f services/agent-proxy/Dockerfile -t posthog-agent-proxy .
 
 # Pin the same Node version as the rest of the monorepo (.nvmrc).
+# The digest wins over the tag — update both together when bumping NODE_VERSION.
 ARG NODE_VERSION=24.13.0
-ARG NODE_IMAGE=node:${NODE_VERSION}-bookworm-slim
+ARG NODE_IMAGE=node:${NODE_VERSION}-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f
 
 #
 # Build stage — install workspace deps, bundle the Hono entry into a single .mjs.
