@@ -177,7 +177,9 @@ logger = logging.getLogger(__name__)
 TASK_RUN_STREAM_KEEPALIVE_INTERVAL_SECONDS = 20.0
 TASK_RUN_STREAM_KEEPALIVE_EVENT_NAME = "keepalive"
 TASK_RUN_STREAM_KEEPALIVE_PAYLOAD = {"type": "keepalive"}
-TASK_RUN_STREAM_END_EVENT_NAME = "stream-end"
+# Terminal "run is complete" event. Named COMPLETE (not END) because connection-rotation
+# work introduces a separate `end` event that means "reconnect", the opposite semantics.
+TASK_RUN_STREAM_COMPLETE_EVENT_NAME = "stream-end"
 TASK_RUN_ARTIFACT_UPLOAD_EXPIRATION_SECONDS = 60 * 60
 
 
@@ -2906,7 +2908,7 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
                     # read_stream_entries only returns on the completion sentinel; emit an
                     # explicit terminal event so the client stops reconnecting without
                     # consulting run status (a dropped connection never reaches here).
-                    yield format_sse_event({"status": "complete"}, event_name=TASK_RUN_STREAM_END_EVENT_NAME)
+                    yield format_sse_event({"status": "complete"}, event_name=TASK_RUN_STREAM_COMPLETE_EVENT_NAME)
                 except TaskRunStreamError as e:
                     outcome = "stream_error"
                     logger.error("TaskRunRedisStream error for stream %s: %s", stream_key, e, exc_info=True)

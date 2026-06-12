@@ -38,7 +38,9 @@ const LOG_POLL_INTERVAL_MS = 1000
 const MAX_STREAM_RECONNECTS = 6
 const STREAM_RECONNECT_BASE_MS = 1000
 const STREAM_RECONNECT_MAX_MS = 15000
-const STREAM_END_EVENT = 'stream-end'
+// "Run is complete" terminal event. Named COMPLETE (not END) because connection-rotation
+// work introduces a separate `end` event that means "reconnect", the opposite semantics.
+const STREAM_COMPLETE_EVENT = 'stream-end'
 
 export type TaskDetailSceneLogicProps = TaskLogicProps
 
@@ -514,7 +516,7 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                                 if (terminated) {
                                     return
                                 }
-                                if (message.event === STREAM_END_EVENT) {
+                                if (message.event === STREAM_COMPLETE_EVENT) {
                                     terminated = true
                                     clearStreamResumeId(runId)
                                     actions.markStreamComplete()
