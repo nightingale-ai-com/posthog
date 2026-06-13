@@ -106,6 +106,13 @@ SANDBOX_JWT_PRIVATE_KEY_SECONDARY: str | None = os.getenv("SANDBOX_JWT_PRIVATE_K
 # signed with either the primary or the secondary key verifies. The proxy holds public keys only.
 SANDBOX_JWT_PUBLIC_KEY_SECONDARY: str | None = os.getenv("SANDBOX_JWT_PUBLIC_KEY_SECONDARY")
 
+# Local dev shares one .env with the agent-proxy, which sets the verify-only public keys. Tests must
+# stay hermetic: they mint with an overridden private key and verify against the same registry, not
+# against whatever key the ambient environment carries.
+if TEST:
+    SANDBOX_JWT_PUBLIC_KEY = None
+    SANDBOX_JWT_PUBLIC_KEY_SECONDARY = None
+
 # Browser origins allowed to read the live stream from the standalone agent-proxy (cross-origin CORS).
 # Comma-separated; "*" allows any; empty disables CORS (same-origin path-routing needs none). Only the
 # agent-proxy reads this; the Django app ignores it.
