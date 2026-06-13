@@ -3175,7 +3175,10 @@ def agent_proxy_callback(request, run_id: str) -> JsonResponse:
 
     elif kind == "awaiting_input":
         try:
-            task_run = TaskRun.objects.select_related("task").get(id=run_id, task_id=task_id, team_id=team_id)
+            # The push dispatcher reads task.created_by; prefetch it so the dispatch stays one query.
+            task_run = TaskRun.objects.select_related("task__created_by").get(
+                id=run_id, task_id=task_id, team_id=team_id
+            )
             if task_run.mode == "interactive":
                 notify_task_run_awaiting_input(task_run)
                 dispatched = True
