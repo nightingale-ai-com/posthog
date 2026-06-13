@@ -199,6 +199,12 @@ def _is_sandbox_event_ingest_enabled(
     run_id: str,
     state: dict | None = None,
 ) -> bool:
+    # Local dev disables the analytics SDK, so the captured flag below is always False there.
+    # Pointing ingest at the local agent-proxy is the opt-in and must win over the captured value;
+    # prod (DEBUG off) still gates on the flag.
+    if settings.DEBUG and settings.TASKS_AGENT_PROXY_INGEST_URL:
+        return True
+
     state_override = (state or {}).get("sandbox_event_ingest_enabled")
     if isinstance(state_override, bool):
         log_with_activity_context(
@@ -207,11 +213,6 @@ def _is_sandbox_event_ingest_enabled(
             sandbox_event_ingest_enabled=state_override,
         )
         return state_override
-
-    # Local dev disables the analytics SDK, so the rollout flag never evaluates. Pointing ingest at
-    # the local agent-proxy is the opt-in there; prod (DEBUG off) still gates on the flag below.
-    if settings.DEBUG and settings.TASKS_AGENT_PROXY_INGEST_URL:
-        return True
 
     try:
         enabled = bool(
