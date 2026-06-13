@@ -4,13 +4,13 @@
 //   REDIS_URL
 //   SANDBOX_JWT_PUBLIC_KEY
 //   AGENT_PROXY_DJANGO_CALLBACK_URL
-//   AGENT_PROXY_METRICS_TOKEN
 //
 // Optional with defaults:
 //   SANDBOX_JWT_PUBLIC_KEY_SECONDARY    — extra public key trusted during key rotation
 //   TASKS_AGENT_PROXY_CORS_ORIGINS      — comma-separated origins; '' disables CORS
 //   AGENT_PROXY_MAX_CONCURRENT_STREAMS  — default 1000; per-pod cap on open SSE streams
 //   AGENT_PROXY_MAX_STREAMS_PER_RUN     — default 25; per-run cap on open SSE streams
+//   AGENT_PROXY_METRICS_TOKEN           — default ''; bearer token gating /_metrics when set
 //   PORT                                — default 8003
 //   HOST                                — default '0.0.0.0'
 //   SHUTDOWN_GRACE_MS                   — default 300000 (5 min)
@@ -36,8 +36,9 @@ export interface Config {
     // not be able to exhaust the pod).
     maxConcurrentStreams: number
     maxStreamsPerRun: number
-    // Bearer token required to scrape /_metrics. This host is publicly reachable, so production
-    // refuses to start without it. Empty (local/dev only) leaves the route open.
+    // Bearer token gating /_metrics when set. Deployments scrape metrics in-cluster via
+    // annotation-based Prometheus, which sends no auth header, so this stays optional and the
+    // route stays open for that scrape; external exposure is blocked at the ingress instead.
     metricsToken: string
     port: number
     host: string
@@ -106,7 +107,7 @@ export function loadConfig(): Config {
         process.exit(1)
     }
 
-    const metricsToken = requireEnv('AGENT_PROXY_METRICS_TOKEN', isProd)
+    const metricsToken = getEnv('AGENT_PROXY_METRICS_TOKEN') ?? ''
 
     const corsOrigins = parseCorsOrigins(getEnv('TASKS_AGENT_PROXY_CORS_ORIGINS') ?? '')
 
