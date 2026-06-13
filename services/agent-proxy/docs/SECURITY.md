@@ -103,3 +103,8 @@ approach, worth it once rotations are frequent or automated.
   TTL covers.
 - Until one of the options above lands, a primary-key rotation has a brief failure window on the
   agent-proxy legs. Plan rotations accordingly, or build Option B first.
+- Rolling deploys interact with rotation the same way: every verifier must trust the full key set
+  before any minter signs with a non-primary key. A Django pod that only verifies against the
+  primary key rejects (401) tokens that a newer pod minted under a run's stored secondary `kid`,
+  so do not enable `SANDBOX_JWT_PRIVATE_KEY_SECONDARY` while pods without multi-key verification
+  are still draining — and conversely, finish or roll back a rotation before such a deploy.
