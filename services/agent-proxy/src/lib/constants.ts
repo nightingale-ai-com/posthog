@@ -24,7 +24,7 @@ export const BLOCK_MS = 100
 export const WAIT_INITIAL_DELAY_MS = 50
 export const WAIT_DELAY_INCREMENT_MS = 150
 export const WAIT_MAX_DELAY_MS = 2_000
-export const WAIT_TIMEOUT_MS = 120_000
+export const WAIT_TIMEOUT_MS = 300_000
 
 // Idle threshold before emitting a keepalive SSE event
 export const KEEPALIVE_INTERVAL_MS = 20_000

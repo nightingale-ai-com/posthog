@@ -56,9 +56,17 @@ async function main(): Promise<void> {
 
     const { app, lifecycle } = createApp(redis, config, publicKeys)
 
-    const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
-        logger.info('server:started', { host: config.host, port: info.port })
-    })
+    const server = serve(
+        {
+            fetch: app.fetch,
+            port: config.port,
+            hostname: config.host,
+            serverOptions: { requestTimeout: 0 },
+        },
+        (info) => {
+            logger.info('server:started', { host: config.host, port: info.port })
+        }
+    )
 
     registerShutdownHandlers({
         server,
