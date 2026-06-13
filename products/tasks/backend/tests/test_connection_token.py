@@ -134,6 +134,27 @@ class TestSandboxJwtRotation(SimpleTestCase):
             with self.assertRaises(jwt.InvalidTokenError):
                 validate_sandbox_event_ingest_token(token)
 
+    def test_stream_read_token_validates_after_primary_rotation(self) -> None:
+        # The stream-read leg must survive rotation the same way ingest does: a token signed under
+        # the old primary keeps validating while the old key is retained as the secondary.
+        with override_settings(SANDBOX_JWT_PRIVATE_KEY=KEY_A, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=None):
+            reset_sandbox_jwt_key_cache()
+            token = create_stream_read_token(_fake_run())
+
+        with override_settings(
+            SANDBOX_JWT_PRIVATE_KEY=KEY_B, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=KEY_A, SANDBOX_JWT_PUBLIC_KEY=None
+        ):
+            reset_sandbox_jwt_key_cache()
+            payload = validate_stream_read_token(token)
+            self.assertEqual(payload.team_id, 1)
+
+        with override_settings(
+            SANDBOX_JWT_PRIVATE_KEY=KEY_B, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=None, SANDBOX_JWT_PUBLIC_KEY=None
+        ):
+            reset_sandbox_jwt_key_cache()
+            with self.assertRaises(jwt.InvalidTokenError):
+                validate_stream_read_token(token)
+
     @override_settings(SANDBOX_JWT_PRIVATE_KEY=KEY_A, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=None)
     def test_connection_token_rejected_as_ingest_token(self) -> None:
         reset_sandbox_jwt_key_cache()
@@ -183,7 +204,7 @@ def test_stream_read_token_rejects_expired():
         validate_stream_read_token(token)
 
 
-@override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY)
+@override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY, SANDBOX_JWT_PUBLIC_KEY=None)
 def test_stream_read_token_is_not_accepted_for_event_ingest():
     reset_sandbox_jwt_key_cache()
     token = create_stream_read_token(_fake_task_run())
