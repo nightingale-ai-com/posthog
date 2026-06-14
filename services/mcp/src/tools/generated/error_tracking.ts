@@ -17,6 +17,7 @@ import {
     ErrorTrackingQueryIssueCreateBody,
     ErrorTrackingQueryIssueEventsCreateBody,
     ErrorTrackingQueryIssuesListCreateBody,
+    ErrorTrackingRecommendationsListQueryParams,
     ErrorTrackingSuppressionRulesCreateBody,
     ErrorTrackingSuppressionRulesListQueryParams,
     ErrorTrackingSuppressionRulesUpdateBody,
@@ -224,6 +225,28 @@ const errorTrackingIssuesSplitCreate = (): ToolBase<
             method: 'POST',
             path: `/api/projects/${encodeURIComponent(String(projectId))}/error_tracking/issues/${encodeURIComponent(String(params.id))}/split/`,
             body,
+        })
+        return result
+    },
+})
+
+const ErrorTrackingRecommendationsListSchema = ErrorTrackingRecommendationsListQueryParams
+
+const errorTrackingRecommendationsList = (): ToolBase<
+    typeof ErrorTrackingRecommendationsListSchema,
+    Schemas.PaginatedErrorTrackingRecommendationList
+> => ({
+    name: 'error-tracking-recommendations-list',
+    schema: ErrorTrackingRecommendationsListSchema,
+    handler: async (context: Context, params: z.infer<typeof ErrorTrackingRecommendationsListSchema>) => {
+        const projectId = await context.stateManager.getProjectId()
+        const result = await context.api.request<Schemas.PaginatedErrorTrackingRecommendationList>({
+            method: 'GET',
+            path: `/api/projects/${encodeURIComponent(String(projectId))}/error_tracking/recommendations/`,
+            query: {
+                limit: params.limit,
+                offset: params.offset,
+            },
         })
         return result
     },
@@ -591,6 +614,7 @@ export const GENERATED_TOOLS: Record<string, () => ToolBase<ZodObjectAny>> = {
     'error-tracking-issues-merge-create': errorTrackingIssuesMergeCreate,
     'error-tracking-issues-partial-update': errorTrackingIssuesPartialUpdate,
     'error-tracking-issues-split-create': errorTrackingIssuesSplitCreate,
+    'error-tracking-recommendations-list': errorTrackingRecommendationsList,
     'error-tracking-suppression-rules-create': errorTrackingSuppressionRulesCreate,
     'error-tracking-suppression-rules-list': errorTrackingSuppressionRulesList,
     'error-tracking-suppression-rules-update': errorTrackingSuppressionRulesUpdate,
