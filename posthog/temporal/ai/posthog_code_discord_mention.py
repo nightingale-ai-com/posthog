@@ -269,22 +269,35 @@ def enforce_discord_billing_quota_activity(inputs: PostHogCodeDiscordMentionWork
 
 @activity.defn
 def prepare_discord_thread_activity(inputs: PostHogCodeDiscordMentionWorkflowInputs) -> dict[str, str]:
-    """Create the thread, post the anchor message, and react with 👀.
+    """Create a thread (or reuse the current one), post the anchor message, and react with 👀.
 
-    The anchor lives inside the thread, so its ``channel_id`` for later reactions/edits is
-    the thread id. Returns the anchor message id and thread id.
+    When ``/ph code`` runs inside an existing thread, Discord can't nest threads, so the task
+    runs in that thread rather than creating a new one. The anchor lives inside the thread, so
+    its ``channel_id`` for later reactions/edits is the thread id. Returns the anchor message
+    id and thread id.
     """
     _integration, client = _get_integration_and_client(inputs.integration_id)
     channel_id = str(inputs.interaction.get("channel_id") or "")
     prompt = (inputs.interaction.get("options") or {}).get("prompt") or "Task from Discord"
     title = prompt.strip()[:80] or "PostHog Code task"
 
-    thread = client.create_thread(channel_id=channel_id, name=title, message_id=inputs.interaction.get("message_id"))
-    thread_id = str(thread.get("thread_id") or "") or channel_id
+    if inputs.interaction.get("channel_is_thread"):
+        # Already a thread — run the task here; creating a nested thread would fail (50024).
+        thread_id = channel_id
+        should_watch = True
+    else:
+        thread = client.create_thread(
+            channel_id=channel_id, name=title, message_id=inputs.interaction.get("message_id")
+        )
+        created_thread_id = str(thread.get("thread_id") or "")
+        thread_id = created_thread_id or channel_id
+        # Only watch a real thread: a fallback to the parent channel would forward every
+        # message in it, not just task replies.
+        should_watch = bool(created_thread_id)
 
     # Register the thread so the bot forwards replies in it back as kind=message.
     # Best-effort: a failure only disables conversational follow-ups, not the task.
-    if thread.get("thread_id"):
+    if should_watch:
         try:
             client.watch_thread(guild_id=inputs.guild_id, thread_id=thread_id)
         except Exception:

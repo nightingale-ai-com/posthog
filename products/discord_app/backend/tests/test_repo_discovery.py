@@ -159,6 +159,23 @@ class TestThreadWatchLifecycle:
             prepare_discord_thread_activity(_inputs())
         client.watch_thread.assert_not_called()
 
+    def test_prepare_runs_in_current_thread_without_creating_one(self):
+        # `/ph code` invoked inside a thread: threads can't nest, so run the task in it.
+        from posthog.temporal.ai.posthog_code_discord_mention import prepare_discord_thread_activity
+
+        inputs = _inputs()
+        inputs.interaction["channel_is_thread"] = True
+        client = MagicMock()
+        client.post_message.return_value = {"message_id": "a1"}
+        with patch(
+            "posthog.temporal.ai.posthog_code_discord_mention._get_integration_and_client",
+            return_value=(MagicMock(), client),
+        ):
+            result = prepare_discord_thread_activity(inputs)
+        client.create_thread.assert_not_called()
+        client.watch_thread.assert_called_once_with(guild_id="g1", thread_id="c1")
+        assert result == {"anchor_message_id": "a1", "thread_id": "c1"}
+
     def test_terminal_update_unwatches_thread(self, settings):
         settings.DISCORD_BOT_ACTIONS_URL = "http://bot.local/actions"
         settings.DISCORD_BRIDGE_SHARED_SECRET = "s"

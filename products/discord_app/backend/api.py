@@ -233,6 +233,9 @@ def _handle_posthog_command(
             "options": payload.get("options") or {},
             "interaction_id": payload.get("interaction_id"),
             "interaction_token": payload.get("interaction_token"),
+            # `/ph code` in an unmanaged thread starts a fresh task there: threads can't
+            # nest, so the workflow runs in the current thread instead of creating one.
+            "channel_is_thread": bool(payload.get("channel_is_thread")),
         },
         integration_id=integration.id,
         guild_id=guild_id,
