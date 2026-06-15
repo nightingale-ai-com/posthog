@@ -24,6 +24,19 @@ SUBMITTED_AT_INCREMENTAL: IncrementalField = {
     "field": "submitted_at",
     "field_type": IncrementalFieldType.DateTime,
 }
+# Only completed responses have a `submitted_at`. When partial/started responses are
+# included, `landed_at` is the one timestamp present on every response type (and it never
+# changes), so it becomes the incremental cursor and partition key for those syncs.
+LANDED_AT_INCREMENTAL: IncrementalField = {
+    "label": "landed_at",
+    "type": IncrementalFieldType.DateTime,
+    "field": "landed_at",
+    "field_type": IncrementalFieldType.DateTime,
+}
+
+# Value sent as Typeform's `response_type` query param when incomplete response syncs are enabled.
+RESPONSE_TYPE_COMPLETED_ONLY = "completed"
+RESPONSE_TYPE_ALL = "completed,partial,started"
 
 
 @dataclass

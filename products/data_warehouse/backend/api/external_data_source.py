@@ -61,6 +61,11 @@ from posthog.temporal.data_imports.sources.postgres.postgres import (
     source_requires_ssl,
 )
 from posthog.temporal.data_imports.sources.postgres.source import PostgresSource
+from posthog.temporal.data_imports.sources.typeform.settings import (
+    LANDED_AT_INCREMENTAL,
+    RESPONSE_TYPE_COMPLETED_ONLY,
+    SUBMITTED_AT_INCREMENTAL,
+)
 
 from products.cdp.backend.api.hog_function import HogFunctionSerializer
 from products.cdp.backend.models.hog_functions.hog_function import HogFunction
@@ -84,6 +89,7 @@ from products.data_warehouse.backend.data_load.service import (
     sync_discover_schemas_schedule,
     sync_external_data_job_workflow,
     trigger_external_data_source_workflow,
+    trigger_external_data_workflow,
 )
 from products.data_warehouse.backend.direct_postgres import upsert_direct_postgres_table
 from products.data_warehouse.backend.external_data_source.webhooks import (
@@ -104,7 +110,11 @@ from products.data_warehouse.backend.sql_warehouse_migration import (
     is_multi_schema_capable_sql_source,
     source_namespace_is_blank,
 )
-from products.data_warehouse.backend.types import DataWarehouseManagedViewSetKind, ExternalDataSourceType
+from products.data_warehouse.backend.types import (
+    DataWarehouseManagedViewSetKind,
+    ExternalDataSourceType,
+    IncrementalFieldType,
+)
 from products.revenue_analytics.backend.joins import ensure_person_join, remove_person_join
 from products.warehouse_sources.backend.models.external_data_job import ExternalDataJob
 from products.warehouse_sources.backend.models.external_data_schema import (
@@ -344,6 +354,58 @@ def has_preserved_credentials(existing: dict[str, Any], incoming: dict[str, Any]
             return True
 
     return False
+
+
+def _typeform_response_types(job_inputs: dict[str, Any]) -> str:
+    return job_inputs.get("response_types") or RESPONSE_TYPE_COMPLETED_ONLY
+
+
+def detect_typeform_response_types_transition(
+    *,
+    source_type: ExternalDataSourceType,
+    existing_job_inputs: dict[str, Any],
+    incoming_job_inputs: dict[str, Any],
+) -> bool:
+    """True when this PATCH changes Typeform's `response_types` (completed-only ⇄ partials included).
+
+    The responses table's incremental cursor and partition key both depend on which response types
+    are synced — `submitted_at` for completed-only, `landed_at` once partial/started are included
+    (the only timestamp every response type carries, and the only stable one). Switching therefore
+    needs a full refresh so the table is rebuilt on the new partition key with a reset watermark.
+    """
+    if source_type != ExternalDataSourceType.TYPEFORM:
+        return False
+    if "response_types" not in incoming_job_inputs:
+        return False
+    return _typeform_response_types(existing_job_inputs) != _typeform_response_types(incoming_job_inputs)
+
+
+def apply_typeform_response_types_reset(
+    source: ExternalDataSource, *, include_partials: bool
+) -> list[ExternalDataSchema]:
+    """Reset the Typeform responses schema so the next run rebuilds it for the new response-type set.
+
+    Flags `reset_pipeline` (the run deletes the table and clears the watermark + partition config)
+    and flips the stored cursor to the timestamp present on every synced response type. Returns the
+    schemas it reset so the caller can trigger an immediate resync after the source save commits.
+    """
+    incremental_field = LANDED_AT_INCREMENTAL["field"] if include_partials else SUBMITTED_AT_INCREMENTAL["field"]
+    rows = list(
+        ExternalDataSchema.objects.filter(team_id=source.team_id, source_id=source.id, name="responses", deleted=False)
+    )
+    for row in rows:
+        config = row.sync_type_config or {}
+        config["reset_pipeline"] = True
+        # The cursor field differs per response-type set, so a stale watermark in the old field's
+        # units would be meaningless — flip the field and drop the watermark for the rebuild.
+        if config.get("incremental_field"):
+            config["incremental_field"] = incremental_field
+            config["incremental_field_type"] = IncrementalFieldType.DateTime.value
+        config.pop("incremental_field_last_value", None)
+        config.pop("incremental_field_earliest_value", None)
+        row.sync_type_config = config
+        row.save()
+    return rows
 
 
 def get_direct_postgres_connection_metadata(
@@ -901,6 +963,17 @@ class ExternalDataSourceSerializers(UserAccessControlSerializerMixin, serializer
         if old_schema is not None:
             apply_sql_warehouse_schema_clear_migration(instance, old_schema)
 
+        # Typeform: switching response types changes the responses cursor/partition field, which
+        # only takes effect on a rebuilt table — so force a full refresh of the responses schema.
+        reset_typeform_schemas: list[ExternalDataSchema] = []
+        if detect_typeform_response_types_transition(
+            source_type=source_type_model,
+            existing_job_inputs=existing_job_inputs,
+            incoming_job_inputs=incoming_job_inputs,
+        ):
+            include_partials = _typeform_response_types(incoming_job_inputs) != RESPONSE_TYPE_COMPLETED_ONLY
+            reset_typeform_schemas = apply_typeform_response_types_reset(instance, include_partials=include_partials)
+
         source_config: Config = source.parse_config(new_job_inputs)
         validated_data["job_inputs"] = source_config.to_dict()
 
@@ -924,6 +997,22 @@ class ExternalDataSourceSerializers(UserAccessControlSerializerMixin, serializer
                 )
 
         updated_source: ExternalDataSource = super().update(instance, validated_data)
+
+        # Kick off the resync now that the reset flags are persisted; the flag alone only takes
+        # effect on the next scheduled run. Best-effort: a missing schedule (never-synced schema)
+        # just means the reset applies on the first manual/scheduled run.
+        for schema in reset_typeform_schemas:
+            try:
+                trigger_external_data_workflow(schema)
+            except Exception:
+                # Best-effort: the reset is already persisted, so a Temporal hiccup (missing
+                # schedule, connection error) must not fail the config save — the reset applies
+                # on the first manual/scheduled run instead.
+                logger.exception(
+                    "Could not trigger resync after Typeform response_types change",
+                    schema_id=str(schema.id),
+                    source_id=str(updated_source.id),
+                )
 
         if updated_source.is_direct_postgres and discovered_schemas is not None:
             schema_names = {schema.name: schema.label for schema in discovered_schemas}

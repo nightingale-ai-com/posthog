@@ -59,12 +59,13 @@ from posthog.temporal.data_imports.sources.stripe.settings import ENDPOINTS as S
 
 from products.data_tools.backend.models.join import DataWarehouseJoin
 from products.data_warehouse.backend.api.external_data_source import (
+    detect_typeform_response_types_transition,
     get_nonsensitive_and_sensitive_field_names,
     strip_sensitive_from_dict,
 )
 from products.data_warehouse.backend.direct_postgres import DIRECT_POSTGRES_URL_PATTERN
 from products.data_warehouse.backend.models.revenue_analytics_config import ExternalDataSourceRevenueAnalyticsConfig
-from products.data_warehouse.backend.types import IncrementalFieldType
+from products.data_warehouse.backend.types import ExternalDataSourceType, IncrementalFieldType
 from products.revenue_analytics.backend.joins import get_customer_revenue_view_name
 from products.warehouse_sources.backend.models.external_data_job import ExternalDataJob
 from products.warehouse_sources.backend.models.external_data_schema import (
@@ -1324,6 +1325,96 @@ class TestExternalDataSource(APIBaseTest):
             data={"job_inputs": {"auth_method": "invalid"}},
         )
         assert patch_response.status_code == 400
+
+    def _create_typeform_source(self, response_types: str = "completed") -> ExternalDataSource:
+        return ExternalDataSource.objects.create(
+            team_id=self.team.pk,
+            source_id=str(uuid.uuid4()),
+            connection_id=str(uuid.uuid4()),
+            destination_id=str(uuid.uuid4()),
+            source_type="Typeform",
+            created_by=self.user,
+            prefix="typeform",
+            job_inputs={"auth_token": "tfp_test", "response_types": response_types},
+        )
+
+    def _create_typeform_responses_schema(self, source_id, incremental_field: str) -> ExternalDataSchema:
+        return ExternalDataSchema.objects.create(
+            name="responses",
+            team_id=self.team.pk,
+            source_id=source_id,
+            sync_type=ExternalDataSchema.SyncType.INCREMENTAL,
+            sync_type_config={
+                "incremental_field": incremental_field,
+                "incremental_field_type": "datetime",
+                "incremental_field_last_value": "2026-03-01T00:00:00Z",
+            },
+        )
+
+    @patch("products.data_warehouse.backend.api.external_data_source.trigger_external_data_workflow")
+    @patch(
+        "posthog.temporal.data_imports.sources.typeform.source.TypeformSource.validate_credentials",
+        return_value=(True, None),
+    )
+    def test_enabling_partial_responses_resets_to_landed_at(self, _mock_validate, mock_trigger):
+        source = self._create_typeform_source(response_types="completed")
+        schema = self._create_typeform_responses_schema(source.pk, incremental_field="submitted_at")
+
+        patch_response = self.client.patch(
+            f"/api/environments/{self.team.pk}/external_data_sources/{source.pk}/",
+            data={"job_inputs": {"response_types": "completed,partial,started"}},
+        )
+        assert patch_response.status_code == 200, patch_response.json()
+
+        schema.refresh_from_db()
+        assert schema.sync_type_config["reset_pipeline"] is True
+        assert schema.sync_type_config["incremental_field"] == "landed_at"
+        assert schema.sync_type_config["incremental_field_type"] == "datetime"
+        assert "incremental_field_last_value" not in schema.sync_type_config
+        # The change must kick off a resync now, not wait for the next scheduled run
+        assert mock_trigger.call_count == 1
+        assert mock_trigger.call_args.args[0].id == schema.id
+
+    @patch("products.data_warehouse.backend.api.external_data_source.trigger_external_data_workflow")
+    @patch(
+        "posthog.temporal.data_imports.sources.typeform.source.TypeformSource.validate_credentials",
+        return_value=(True, None),
+    )
+    def test_disabling_partial_responses_resets_to_submitted_at(self, _mock_validate, mock_trigger):
+        source = self._create_typeform_source(response_types="completed,partial,started")
+        schema = self._create_typeform_responses_schema(source.pk, incremental_field="landed_at")
+
+        patch_response = self.client.patch(
+            f"/api/environments/{self.team.pk}/external_data_sources/{source.pk}/",
+            data={"job_inputs": {"response_types": "completed"}},
+        )
+        assert patch_response.status_code == 200, patch_response.json()
+
+        schema.refresh_from_db()
+        assert schema.sync_type_config["reset_pipeline"] is True
+        assert schema.sync_type_config["incremental_field"] == "submitted_at"
+        assert mock_trigger.call_count == 1
+
+    @patch("products.data_warehouse.backend.api.external_data_source.trigger_external_data_workflow")
+    @patch(
+        "posthog.temporal.data_imports.sources.typeform.source.TypeformSource.validate_credentials",
+        return_value=(True, None),
+    )
+    def test_unchanged_response_types_does_not_reset(self, _mock_validate, mock_trigger):
+        source = self._create_typeform_source(response_types="completed")
+        schema = self._create_typeform_responses_schema(source.pk, incremental_field="submitted_at")
+
+        patch_response = self.client.patch(
+            f"/api/environments/{self.team.pk}/external_data_sources/{source.pk}/",
+            data={"job_inputs": {"response_types": "completed"}},
+        )
+        assert patch_response.status_code == 200, patch_response.json()
+
+        schema.refresh_from_db()
+        assert "reset_pipeline" not in schema.sync_type_config
+        assert schema.sync_type_config["incremental_field"] == "submitted_at"
+        assert schema.sync_type_config["incremental_field_last_value"] == "2026-03-01T00:00:00Z"
+        assert mock_trigger.call_count == 0
 
     def test_get_external_data_source_with_schema(self):
         source = self._create_external_data_source()
@@ -8895,3 +8986,62 @@ class TestExternalDataSourceStoreCredentials(APIBaseTest):
         response = self.client.get(f"/api/environments/{self.team.pk}/external_data_sources/stored_credentials/")
         assert response.status_code == status.HTTP_200_OK
         assert [result["credential_id"] for result in response.json()] == [str(newer.pk), str(older.pk)]
+
+
+class TestDetectTypeformResponseTypesTransition:
+    @parameterized.expand(
+        [
+            ("enable_partials", "completed", "completed,partial,started", True),
+            ("disable_partials", "completed,partial,started", "completed", True),
+            ("unchanged_completed", "completed", "completed", False),
+            ("unchanged_partials", "completed,partial,started", "completed,partial,started", False),
+        ]
+    )
+    def test_detects_change(self, _name, existing, incoming, expected) -> None:
+        assert (
+            detect_typeform_response_types_transition(
+                source_type=ExternalDataSourceType.TYPEFORM,
+                existing_job_inputs={"response_types": existing},
+                incoming_job_inputs={"response_types": incoming},
+            )
+            is expected
+        )
+
+    def test_missing_existing_defaults_to_completed(self) -> None:
+        # A source created before the field existed has no stored response_types
+        assert (
+            detect_typeform_response_types_transition(
+                source_type=ExternalDataSourceType.TYPEFORM,
+                existing_job_inputs={},
+                incoming_job_inputs={"response_types": "completed,partial,started"},
+            )
+            is True
+        )
+        assert (
+            detect_typeform_response_types_transition(
+                source_type=ExternalDataSourceType.TYPEFORM,
+                existing_job_inputs={},
+                incoming_job_inputs={"response_types": "completed"},
+            )
+            is False
+        )
+
+    def test_no_response_types_in_patch_is_noop(self) -> None:
+        assert (
+            detect_typeform_response_types_transition(
+                source_type=ExternalDataSourceType.TYPEFORM,
+                existing_job_inputs={"response_types": "completed"},
+                incoming_job_inputs={"auth_token": "rotated"},
+            )
+            is False
+        )
+
+    def test_non_typeform_source_is_noop(self) -> None:
+        assert (
+            detect_typeform_response_types_transition(
+                source_type=ExternalDataSourceType.STRIPE,
+                existing_job_inputs={"response_types": "completed"},
+                incoming_job_inputs={"response_types": "completed,partial,started"},
+            )
+            is False
+        )
