@@ -22,23 +22,23 @@ class DedupeSandboxEnvironmentsMigrationTest(NonAtomicTestMigrations):
         from django.db import connection
         from django.db.migrations.executor import MigrationExecutor
 
-        migrate_from = [
+        migrate_from_targets = [
             ("tasks", self.migrate_from),
             ("posthog", "1166_oauth_impersonated_by"),
         ]
-        migrate_to = [("tasks", self.migrate_to)]
+        migrate_to_targets = [("tasks", self.migrate_to)]
 
         executor = MigrationExecutor(connection)
-        old_apps = executor.loader.project_state(migrate_from).apps
-        executor.migrate(migrate_from)
+        old_apps = executor.loader.project_state(migrate_from_targets).apps
+        executor.migrate(migrate_from_targets)
 
         self.setUpBeforeMigration(old_apps)
 
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
-        executor.migrate(migrate_to)
+        executor.migrate(migrate_to_targets)
 
-        self.apps = executor.loader.project_state(migrate_to).apps
+        self.apps = executor.loader.project_state(migrate_to_targets).apps
 
     def setUpBeforeMigration(self, apps: Any) -> None:
         Organization = apps.get_model("posthog", "Organization")
