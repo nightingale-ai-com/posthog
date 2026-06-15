@@ -2,7 +2,6 @@ import { DateTime } from 'luxon'
 
 import { PluginEvent } from '~/plugin-scaffold'
 
-import { buildIntegerMatcher } from '../../config/config'
 import { Person, Team } from '../../types'
 import { normalizeProcessPerson } from '../../utils/event'
 import { uuidFromDistinctId } from '../../worker/ingestion/person-uuid'
@@ -12,6 +11,7 @@ import {
     personlessDistinctIdCacheOperationsCounter,
 } from '../../worker/ingestion/persons/personless-distinct-id-cache'
 import { PersonsStoreForBatch } from '../../worker/ingestion/persons/persons-store-for-batch'
+import { buildFlagCalledPersonlessMatcher, isFlagCalledPersonlessCandidate } from '../common/flag-called-personless'
 import { DEFAULT_FLAG_CALLED_PERSONLESS_DEFAULT_TEAMS } from '../config'
 import { PipelineResult, ok } from '../pipelines/results'
 import { ProcessingStep } from '../pipelines/steps'
@@ -28,21 +28,6 @@ export type ProcessPersonlessInput = {
 
 export type ProcessPersonlessOutput = {
     personlessPerson?: Person
-}
-
-const FEATURE_FLAG_CALLED_EVENT = '$feature_flag_called'
-
-/**
- * Group-keyed experiment exposure queries read the $group_N columns from the exposure
- * event, and createEvent strips those for personless events. Events carrying group keys
- * must stay personful or their exposures disappear from group-aggregated experiments.
- * Checking $groups alone is sufficient: SDKs only ever send group keys as $groups, and
- * $group_N is an internal representation the groups step derives from $groups (and only
- * when processPerson stays true), so it never arrives here pre-expanded from a client.
- */
-function eventHasGroups(properties: PluginEvent['properties']): boolean {
-    const groups = properties?.$groups
-    return typeof groups === 'object' && groups !== null && !Array.isArray(groups) && Object.keys(groups).length > 0
 }
 
 /**
@@ -62,17 +47,18 @@ function eventHasGroups(properties: PluginEvent['properties']): boolean {
 export function createProcessPersonlessStep<TInput extends ProcessPersonlessInput>(
     flagCalledPersonlessDefaultTeams: string = DEFAULT_FLAG_CALLED_PERSONLESS_DEFAULT_TEAMS
 ): ProcessingStep<TInput, TInput & ProcessPersonlessOutput> {
-    const flagCalledDefaultEnabledForTeam = buildIntegerMatcher(flagCalledPersonlessDefaultTeams.trim(), true)
+    const flagCalledDefaultEnabledForTeam = buildFlagCalledPersonlessMatcher(flagCalledPersonlessDefaultTeams)
 
     return async function processPersonlessStep(
         input: TInput
     ): Promise<PipelineResult<TInput & ProcessPersonlessOutput>> {
         if (input.processPerson) {
-            const mayDefaultFlagCalledToPersonless =
-                input.normalizedEvent.event === FEATURE_FLAG_CALLED_EVENT &&
-                !input.processPersonExplicitlyTrue &&
-                !eventHasGroups(input.normalizedEvent.properties) &&
-                flagCalledDefaultEnabledForTeam(input.team.id)
+            const mayDefaultFlagCalledToPersonless = isFlagCalledPersonlessCandidate(
+                input.normalizedEvent,
+                input.team.id,
+                input.processPersonExplicitlyTrue,
+                flagCalledDefaultEnabledForTeam
+            )
 
             if (!mayDefaultFlagCalledToPersonless) {
                 return ok(input)
@@ -154,10 +140,10 @@ async function applyFeatureFlagCalledPersonlessDefault<TInput extends ProcessPer
                 personlessDistinctIdCacheOperationsCounter.inc({ operation: 'hit', source: 'flag_called' })
             } else {
                 personlessDistinctIdCacheOperationsCounter.inc({ operation: 'miss', source: 'flag_called' })
-                // The batch step (processPersonlessDistinctIdsBatchStep) only inserts rows for
-                // events with explicit $process_person_profile=false, so record this distinct ID
-                // here. Without the row, a later identify/merge would never re-point these
-                // events at the merged person.
+                // The batch step (processPersonlessDistinctIdsBatchStep) pre-inserts flag_called
+                // rows when enabled, but it may be disabled or this distinct ID may be first-seen,
+                // so record it here when the LRU shows no prior insert. Without the row, a later
+                // identify/merge would never re-point these events at the merged person.
                 personIsMerged = await personsStore.addPersonlessDistinctId(team.id, distinctId)
                 markPersonlessDistinctIdInserted(team.id, distinctId)
             }
