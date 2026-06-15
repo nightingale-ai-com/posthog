@@ -6497,7 +6497,9 @@ class TestSandboxEnvironmentAPI(BaseTaskAPITest):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("already exists", str(response.json()["name"]))
+        body = response.json()
+        self.assertEqual(body["attr"], "name")
+        self.assertIn("already exists", body["detail"])
 
     def test_create_rejects_name_matching_public_environment(self):
         other_user = User.objects.create_user(email="dup-pub@example.com", first_name="Other", password="password")

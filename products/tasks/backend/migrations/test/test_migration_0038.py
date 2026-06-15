@@ -66,11 +66,12 @@ class DedupeSandboxEnvironmentsMigrationTest(NonAtomicTestMigrations):
         self.singleton = make("prod", False, "2024-01-01T00:00:00Z")
 
         task = Task.objects.create(team=team, title="t", description="", origin_product="signal_report")
-        self.run = TaskRun.objects.create(
+        self.task_run = TaskRun.objects.create(
             task=task, team=team, state={"sandbox_environment_id": str(self.internal_old.id)}
         )
 
     def test_keeps_most_recent_row_per_group(self):
+        assert self.apps is not None
         SandboxEnvironment = self.apps.get_model("tasks", "SandboxEnvironment")
         internal = SandboxEnvironment.objects.filter(team_id=self.team_id, name="SIGNALS_REPO_DISCOVERY")
         user = SandboxEnvironment.objects.filter(team_id=self.team_id, name="staging")
@@ -78,10 +79,12 @@ class DedupeSandboxEnvironmentsMigrationTest(NonAtomicTestMigrations):
         self.assertEqual(list(user.values_list("id", flat=True)), [self.user_new.id])
 
     def test_repoints_references_to_keeper(self):
+        assert self.apps is not None
         TaskRun = self.apps.get_model("tasks", "TaskRun")
-        run = TaskRun.objects.get(id=self.run.id)
+        run = TaskRun.objects.get(id=self.task_run.id)
         self.assertEqual(run.state["sandbox_environment_id"], str(self.internal_new.id))
 
     def test_leaves_singleton_untouched(self):
+        assert self.apps is not None
         SandboxEnvironment = self.apps.get_model("tasks", "SandboxEnvironment")
         self.assertTrue(SandboxEnvironment.objects.filter(id=self.singleton.id).exists())

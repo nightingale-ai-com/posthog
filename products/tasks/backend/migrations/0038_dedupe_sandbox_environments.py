@@ -11,9 +11,8 @@ def dedupe_sandbox_environments(apps, schema_editor):
     """Collapse duplicate (team, name) sandbox environments to the most recent row.
 
     Required before the unique constraint can be added. Repoints TaskRun.state
-    references off the surplus rows, then deletes them. Batched and non-atomic so it
-    holds only short-lived locks and never loads the whole table into memory;
-    idempotent.
+    references off the surplus rows, then deletes them. Queries are batched so the
+    whole table is never loaded into memory; idempotent.
     """
     SandboxEnvironment = apps.get_model("tasks", "SandboxEnvironment")
     TaskRun = apps.get_model("tasks", "TaskRun")
@@ -58,10 +57,6 @@ def dedupe_sandbox_environments(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    # Non-atomic so each batch commits independently rather than holding locks
-    # across the whole table for the duration of the migration.
-    atomic = False
-
     dependencies = [
         ("tasks", "0037_codeworkflowconfig_codeprsnapshot_codeworkstream"),
     ]
