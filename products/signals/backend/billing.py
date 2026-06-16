@@ -17,6 +17,7 @@ from django.db.models import CharField, F, Func, JSONField, Value
 from django.db.models.functions import Cast
 
 from products.signals.backend.models import SignalReportArtefact, SignalReportTask
+from products.signals.backend.report_generation.research import ActionabilityChoice, Priority
 from products.tasks.backend.models import TaskRun
 
 _IMPLEMENTATION = SignalReportTask.Relationship.IMPLEMENTATION
@@ -25,44 +26,57 @@ SIGNALS_CREDITS_PER_DOLLAR = 100  # 1 credit = $0.01, matching ai_credits
 
 # Flat credits charged per actionable report that shipped a PR, keyed by priority.
 SIGNALS_PRIORITY_CREDITS: dict[str, int] = {
-    "P0": 24 * SIGNALS_CREDITS_PER_DOLLAR,  # 2400
-    "P1": 15 * SIGNALS_CREDITS_PER_DOLLAR,  # 1500
-    "P2": 5 * SIGNALS_CREDITS_PER_DOLLAR,  # 500
-    "P3": 1 * SIGNALS_CREDITS_PER_DOLLAR,  # 100
-    "P4": 1 * SIGNALS_CREDITS_PER_DOLLAR,  # 100
+    Priority.P0.value: 24 * SIGNALS_CREDITS_PER_DOLLAR,  # 2400
+    Priority.P1.value: 15 * SIGNALS_CREDITS_PER_DOLLAR,  # 1500
+    Priority.P2.value: 5 * SIGNALS_CREDITS_PER_DOLLAR,  # 500
+    Priority.P3.value: 1 * SIGNALS_CREDITS_PER_DOLLAR,  # 100
+    Priority.P4.value: 1 * SIGNALS_CREDITS_PER_DOLLAR,  # 100
 }
 
-_IMMEDIATELY_ACTIONABLE = "immediately_actionable"
+
+def _artefact_json_value(key: str) -> Func:
+    """Postgres expression extracting `content->>key` from a `SignalReportArtefact`."""
+    return Func(
+        Cast(F("content"), output_field=JSONField()),
+        Value(key),
+        function="jsonb_extract_path_text",
+        output_field=CharField(),
+    )
 
 
-def _latest_artefact_values(report_ids: list[uuid.UUID], artefact_type: str, key: str) -> dict[uuid.UUID, str]:
-    """Latest value of `key` from each report's most recent artefact of `artefact_type`.
+def _latest_priority_and_actionability(
+    report_ids: list[uuid.UUID],
+) -> tuple[dict[uuid.UUID, str], dict[uuid.UUID, str]]:
+    """Latest priority and actionability per report, from their newest judgment artefacts.
 
-    Priority and actionability live as JSON in `SignalReportArtefact.content`, not as
-    columns — mirrors the extraction in `views.py`. Uses the `(report, type)` index.
+    Both values live as JSON in `SignalReportArtefact.content`, not as columns. A single query
+    over the `(report, type)` index fetches both, picking the newest artefact per (report, type).
     """
     if not report_ids:
-        return {}
+        return {}, {}
 
+    artefact_type = SignalReportArtefact.ArtefactType
     rows = (
         SignalReportArtefact.objects.filter(
             report_id__in=report_ids,
-            type=artefact_type,
+            type__in=[artefact_type.PRIORITY_JUDGMENT, artefact_type.ACTIONABILITY_JUDGMENT],
             content__startswith="{",
         )
-        .order_by("report_id", "-created_at")
-        .annotate(
-            _val=Func(
-                Cast(F("content"), output_field=JSONField()),
-                Value(key),
-                function="jsonb_extract_path_text",
-                output_field=CharField(),
-            ),
-        )
-        .values("report_id", "_val")
-        .distinct("report_id")
+        .order_by("report_id", "type", "-created_at")
+        .annotate(_priority=_artefact_json_value("priority"), _actionability=_artefact_json_value("actionability"))
+        .values("report_id", "type", "_priority", "_actionability")
+        .distinct("report_id", "type")
     )
-    return {row["report_id"]: row["_val"] for row in rows if row["_val"]}
+
+    priority: dict[uuid.UUID, str] = {}
+    actionability: dict[uuid.UUID, str] = {}
+    for row in rows:
+        if row["type"] == artefact_type.PRIORITY_JUDGMENT:
+            if row["_priority"]:
+                priority[row["report_id"]] = row["_priority"]
+        elif row["_actionability"]:
+            actionability[row["report_id"]] = row["_actionability"]
+    return priority, actionability
 
 
 def get_signals_billing_credits_by_team(begin: datetime, end: datetime) -> list[tuple[int, int]]:
@@ -76,11 +90,10 @@ def get_signals_billing_credits_by_team(begin: datetime, end: datetime) -> list[
     task runs, or teams: the entry scan uses the `created_at` + `output__pr_url` indexes, and
     every follow-up lookup is keyed on the small resulting report set.
     """
-    # (report, team) pairs whose implementation produced a PR within this period. Distinct
-    # collapses multiple runs/tasks for the same report down to one row. The relationship and
-    # pr_url constraints stay in a single filter() so they resolve against one bridge join.
-    report_team: dict[uuid.UUID, int] = {}
-    for report_id, team_id in (
+    # (report -> team) for reports whose implementation produced a PR within this period.
+    # Distinct collapses multiple runs/tasks for the same report; the relationship and pr_url
+    # constraints stay in a single filter() so they resolve against one bridge join.
+    report_team: dict[uuid.UUID, int] = dict(
         TaskRun.objects.filter(
             created_at__gte=begin,
             created_at__lt=end,
@@ -90,9 +103,7 @@ def get_signals_billing_credits_by_team(begin: datetime, end: datetime) -> list[
         .exclude(output__pr_url="")
         .values_list("task__signal_report_tasks__report_id", "team_id")
         .distinct()
-    ):
-        if report_id is not None:
-            report_team.setdefault(report_id, team_id)
+    )
 
     if not report_team:
         return []
@@ -115,18 +126,13 @@ def get_signals_billing_credits_by_team(begin: datetime, end: datetime) -> list[
     if not billable_ids:
         return []
 
-    priority_by_report = _latest_artefact_values(
-        billable_ids, SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT, "priority"
-    )
-    actionability_by_report = _latest_artefact_values(
-        billable_ids, SignalReportArtefact.ArtefactType.ACTIONABILITY_JUDGMENT, "actionability"
-    )
+    priority_by_report, actionability_by_report = _latest_priority_and_actionability(billable_ids)
 
     totals: dict[int, int] = defaultdict(int)
     for report_id in billable_ids:
-        if actionability_by_report.get(report_id) != _IMMEDIATELY_ACTIONABLE:
+        if actionability_by_report.get(report_id) != ActionabilityChoice.IMMEDIATELY_ACTIONABLE.value:
             continue
-        credits = SIGNALS_PRIORITY_CREDITS.get(priority_by_report.get(report_id) or "")
+        credits = SIGNALS_PRIORITY_CREDITS.get(priority_by_report.get(report_id))
         if not credits:
             continue
         totals[report_team[report_id]] += credits
