@@ -4207,18 +4207,16 @@ class TestAIEventsUsageReport(ClickhouseDestroyTablesMixin, TestCase, Clickhouse
         report = SignalReport.objects.create(
             team=self.org_1_team_1, status=SignalReport.Status.READY, signal_count=1, total_weight=1.0
         )
-        SignalReportArtefact.objects.create(
-            team=self.org_1_team_1,
-            report=report,
-            type=SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT,
-            content=json.dumps({"priority": "P0"}),
-        )
-        SignalReportArtefact.objects.create(
-            team=self.org_1_team_1,
-            report=report,
-            type=SignalReportArtefact.ArtefactType.ACTIONABILITY_JUDGMENT,
-            content=json.dumps({"actionability": "immediately_actionable"}),
-        )
+        # Judgments are read as of the first PR, so they must predate the run below.
+        before_pr = period_start - relativedelta(days=1)
+        for artefact_type, payload in (
+            (SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT, {"priority": "P0"}),
+            (SignalReportArtefact.ArtefactType.ACTIONABILITY_JUDGMENT, {"actionability": "immediately_actionable"}),
+        ):
+            artefact = SignalReportArtefact.objects.create(
+                team=self.org_1_team_1, report=report, type=artefact_type, content=json.dumps(payload)
+            )
+            SignalReportArtefact.objects.filter(pk=artefact.pk).update(created_at=before_pr)
         task = Task.objects.create(
             team=self.org_1_team_1, title="impl", description="d", origin_product=Task.OriginProduct.SIGNAL_REPORT
         )

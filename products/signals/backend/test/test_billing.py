@@ -19,7 +19,27 @@ def _at(day: int, hour: int = 12) -> datetime:
     return datetime(2026, 6, day, hour, tzinfo=UTC)
 
 
+# Judgment artefacts are produced during research, before the implementation PR ships. Default
+# them well before any in-period PR so the "frozen at first PR" cutoff includes them.
+_ARTEFACT_AT = datetime(2026, 5, 1, tzinfo=UTC)
+
+
 class TestSignalsBilling(BaseTest):
+    def _artefact(
+        self,
+        report: SignalReport,
+        artefact_type: str,
+        payload: dict | str,
+        *,
+        at: datetime,
+        team: Team | None = None,
+    ) -> SignalReportArtefact:
+        content = payload if isinstance(payload, str) else json.dumps(payload)
+        art = SignalReportArtefact(team=team or self.team, report=report, type=artefact_type, content=content)
+        art.save()  # created_at is auto_now_add; override it to control the freeze cutoff
+        SignalReportArtefact.objects.filter(pk=art.pk).update(created_at=at)
+        return art
+
     def _report(
         self,
         *,
@@ -27,22 +47,25 @@ class TestSignalsBilling(BaseTest):
         priority: str | None = "P0",
         actionability: str | None = "immediately_actionable",
         status: str = SignalReport.Status.READY,
+        artefact_at: datetime = _ARTEFACT_AT,
     ) -> SignalReport:
         team = team or self.team
         report = SignalReport.objects.create(team=team, status=status, signal_count=1, total_weight=1.0)
         if priority is not None:
-            SignalReportArtefact.objects.create(
+            self._artefact(
+                report,
+                SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT,
+                {"explanation": "x", "priority": priority},
+                at=artefact_at,
                 team=team,
-                report=report,
-                type=SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT,
-                content=json.dumps({"explanation": "x", "priority": priority}),
             )
         if actionability is not None:
-            SignalReportArtefact.objects.create(
+            self._artefact(
+                report,
+                SignalReportArtefact.ArtefactType.ACTIONABILITY_JUDGMENT,
+                {"explanation": "x", "actionability": actionability, "already_addressed": False},
+                at=artefact_at,
                 team=team,
-                report=report,
-                type=SignalReportArtefact.ArtefactType.ACTIONABILITY_JUDGMENT,
-                content=json.dumps({"explanation": "x", "actionability": actionability, "already_addressed": False}),
             )
         return report
 
@@ -160,3 +183,35 @@ class TestSignalsBilling(BaseTest):
 
     def test_no_billable_reports_returns_empty(self) -> None:
         self.assertEqual(get_signals_billing_credits_by_team(PERIOD_START, PERIOD_END), [])
+
+    def test_priority_frozen_at_first_pr_time(self) -> None:
+        # Re-judged P2 -> P0 after the PR shipped must not change the bill.
+        report = self._report(priority="P2")
+        self._pr_run(report, created_at=_at(10))
+        self._artefact(report, SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT, {"priority": "P0"}, at=_at(20))
+        self.assertEqual(self._credits(), {self.team.id: 500})
+
+    def test_actionability_frozen_at_first_pr_time(self) -> None:
+        # Flipped to not_actionable after the PR shipped must not drop the bill.
+        report = self._report(priority="P0")
+        self._pr_run(report, created_at=_at(10))
+        self._artefact(
+            report,
+            SignalReportArtefact.ArtefactType.ACTIONABILITY_JUDGMENT,
+            {"actionability": "not_actionable"},
+            at=_at(20),
+        )
+        self.assertEqual(self._credits(), {self.team.id: 2400})
+
+    def test_latest_judgment_before_pr_wins(self) -> None:
+        report = self._report(priority="P2")  # at _ARTEFACT_AT
+        self._artefact(report, SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT, {"priority": "P0"}, at=_at(5))
+        self._pr_run(report, created_at=_at(10))
+        self.assertEqual(self._credits(), {self.team.id: 2400})
+
+    def test_malformed_priority_artefact_falls_back_to_valid(self) -> None:
+        # A malformed newer artefact must neither crash nor win — an older valid one is used.
+        report = self._report(priority="P0")
+        self._artefact(report, SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT, "not valid json", at=_at(5))
+        self._pr_run(report, created_at=_at(10))
+        self.assertEqual(self._credits(), {self.team.id: 2400})
