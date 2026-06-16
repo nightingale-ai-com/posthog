@@ -47,6 +47,58 @@ const HARNESS_RESULTS = [
     ['visual studio code', 540, 12, 120],
 ]
 
+// Daily success/error split powering the "Daily tool calls and errors" chart. [day, successes, errors]
+const ACTIVITY_RESULTS = [
+    ['2026-06-01', 4180, 120],
+    ['2026-06-02', 4360, 140],
+    ['2026-06-03', 4560, 160],
+    ['2026-06-04', 4430, 170],
+    ['2026-06-05', 4720, 180],
+    ['2026-06-06', 4920, 176],
+    ['2026-06-07', 5130, 168],
+]
+
+// Daily calls per tool powering the "Daily tool breakdown" stacked bars. [day, tool, calls]
+const TOOL_DAILY_RESULTS = [
+    ['exec', [720, 760, 800, 740, 820, 880, 910]],
+    ['execute-sql', [210, 230, 250, 240, 260, 280, 300]],
+    ['read-data-schema', [110, 120, 95, 130, 140, 150, 120]],
+    ['query-trends', [60, 80, 70, 90, 100, 80, 110]],
+].flatMap(([tool, series]) => (series as number[]).map((calls, i) => [`2026-06-0${i + 1}`, tool as string, calls]))
+
+// Tool quality tab fixtures. Columns mirror the SELECT order in
+// mcpAnalyticsToolQualityLogic / backend/templates/tool_quality.sql.
+const TOOL_QUALITY_CATEGORIES = [['read'], ['write'], ['admin']]
+
+const TOOL_QUALITY_CATEGORY_COUNTS = [
+    ['read', 8200],
+    ['write', 3100],
+    ['admin', 540],
+]
+
+// [tool, total_calls, errors, error_rate_pct, p50, p95, p99, users, sessions, first_seen, last_seen]
+const TOOL_QUALITY_ROWS = [
+    ['exec', 5200, 208, 4.0, 880, 2290, 4100, 320, 410, '2026-05-08T09:12:00Z', '2026-06-07T10:09:00Z'],
+    ['execute-sql', 1480, 144, 9.7, 1450, 3525, 6200, 210, 260, '2026-05-08T11:30:00Z', '2026-06-07T09:58:00Z'],
+    ['read-data-schema', 760, 3, 0.4, 540, 1298, 2105, 180, 240, '2026-05-09T08:00:00Z', '2026-06-07T08:40:00Z'],
+    ['query-trends', 540, 5, 1.0, 980, 2122, 3300, 120, 160, '2026-05-10T14:00:00Z', '2026-06-06T18:20:00Z'],
+    ['insight-create', 410, 8, 2.0, 410, 727, 1190, 96, 140, '2026-05-11T10:00:00Z', '2026-06-07T07:10:00Z'],
+    ['dashboard-create', 260, 2, 0.8, 520, 940, 1480, 70, 100, '2026-05-12T13:00:00Z', '2026-06-06T16:00:00Z'],
+    ['feature-flag-list', 180, 1, 0.6, 240, 510, 880, 54, 70, '2026-05-14T09:00:00Z', '2026-06-05T12:00:00Z'],
+    ['cohort-create', 95, 6, 6.3, 760, 1620, 2400, 32, 44, '2026-05-15T15:00:00Z', '2026-06-04T11:00:00Z'],
+]
+
+// [day, calls, errors, p50, p95, p99]
+const TOOL_QUALITY_DAILY = [
+    ['2026-06-01', 4300, 150, 820, 2100, 3900],
+    ['2026-06-02', 4500, 165, 840, 2200, 4050],
+    ['2026-06-03', 4720, 158, 800, 2080, 3850],
+    ['2026-06-04', 4600, 170, 860, 2290, 4200],
+    ['2026-06-05', 4900, 182, 880, 2150, 3980],
+    ['2026-06-06', 5100, 176, 850, 2240, 4100],
+    ['2026-06-07', 5300, 168, 830, 2290, 4150],
+]
+
 const SESSION_LIST = {
     results: [
         {
@@ -148,16 +200,37 @@ const meta: Meta = {
     decorators: [
         mswDecorator({
             get: {
-                '/api/environments/:team_id/mcp_analytics/intent_clusters/': CLUSTER_SNAPSHOT,
-                '/api/environments/:team_id/mcp_analytics/sessions/': SESSION_LIST,
-                '/api/environments/:team_id/mcp_analytics/sessions/:session_id/tool_calls/': TOOL_CALL_LIST,
+                '/api/projects/:project_id/mcp_analytics/intent_clusters/': CLUSTER_SNAPSHOT,
+                '/api/projects/:project_id/mcp_analytics/sessions/': SESSION_LIST,
+                '/api/projects/:project_id/mcp_analytics/sessions/:session_id/tool_calls/': TOOL_CALL_LIST,
             },
             post: {
                 '/api/environments/:team_id/query/:kind': (req, res, ctx) => {
                     const body = req.body as Record<string, any>
                     const query: string = body?.query?.query ?? ''
+                    // Tool quality tab — checked before the dashboard handlers because the tool
+                    // rows query also contains `p95_duration_ms`, so its `p99_duration_ms` guard
+                    // must win first.
+                    if (query.includes('DISTINCT') && query.includes('AS category')) {
+                        return res(ctx.json({ results: TOOL_QUALITY_CATEGORIES }))
+                    }
+                    if (query.includes('$mcp_tool_category') && query.includes('count() AS calls')) {
+                        return res(ctx.json({ results: TOOL_QUALITY_CATEGORY_COUNTS }))
+                    }
+                    if (query.includes('p99_duration_ms')) {
+                        return res(ctx.json({ results: TOOL_QUALITY_ROWS }))
+                    }
+                    if (query.includes('AS day') && query.includes('AS p50')) {
+                        return res(ctx.json({ results: TOOL_QUALITY_DAILY }))
+                    }
                     if (query.includes('$mcp_client_name')) {
                         return res(ctx.json({ results: HARNESS_RESULTS }))
+                    }
+                    if (query.includes('AS successes')) {
+                        return res(ctx.json({ results: ACTIVITY_RESULTS }))
+                    }
+                    if (query.includes('AS day') && query.includes('AS tool')) {
+                        return res(ctx.json({ results: TOOL_DAILY_RESULTS }))
                     }
                     if (query.includes('AS session_id')) {
                         return res(ctx.json({ results: SESSION_RESULTS }))
@@ -190,5 +263,11 @@ export const Dashboard: Story = {}
 export const Sessions: Story = {
     parameters: {
         pageUrl: urls.mcpAnalyticsSessions(),
+    },
+}
+
+export const ToolQuality: Story = {
+    parameters: {
+        pageUrl: urls.mcpAnalyticsToolQuality(),
     },
 }
