@@ -1,11 +1,18 @@
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from requests import Request, Response
 
-from posthog.temporal.data_imports.sources.zendesk.zendesk import ZendeskTicketsCursorIncrementalPaginator
+from posthog.temporal.data_imports.sources.zendesk.settings import INCREMENTAL_ENDPOINTS, INCREMENTAL_FIELDS
+from posthog.temporal.data_imports.sources.zendesk.zendesk import (
+    ZendeskCursorIncrementalPaginator,
+    ZendeskIncrementalEndpointPaginator,
+    get_resource,
+    to_zendesk_start_time,
+)
 
 
 def _make_response(json_body: dict[str, Any] | None = None) -> Response:
@@ -16,9 +23,9 @@ def _make_response(json_body: dict[str, Any] | None = None) -> Response:
     return resp
 
 
-class TestZendeskTicketsCursorIncrementalPaginator:
+class TestZendeskCursorIncrementalPaginator:
     def test_advances_to_next_cursor(self) -> None:
-        p = ZendeskTicketsCursorIncrementalPaginator()
+        p = ZendeskCursorIncrementalPaginator()
         resp = _make_response({"tickets": [{"id": 1}], "after_cursor": "abc123", "end_of_stream": False})
 
         p.update_state(resp)
@@ -35,7 +42,7 @@ class TestZendeskTicketsCursorIncrementalPaginator:
         assert req.params["per_page"] == 1000
 
     def test_first_request_keeps_seed_start_time(self) -> None:
-        p = ZendeskTicketsCursorIncrementalPaginator()
+        p = ZendeskCursorIncrementalPaginator()
 
         # Before any response, has_next_page is True and no cursor is set, so the
         # first request must go out untouched (with its seed start_time).
@@ -48,6 +55,18 @@ class TestZendeskTicketsCursorIncrementalPaginator:
         assert req.params["start_time"] == 1591394586
         assert "cursor" not in req.params
 
+    def test_works_for_any_data_key(self) -> None:
+        # The paginator only reads top-level after_cursor/end_of_stream, so the users
+        # cursor export (data key "users") paginates identically to tickets.
+        p = ZendeskCursorIncrementalPaginator()
+        p.update_state(_make_response({"users": [{"id": 1}], "after_cursor": "u1", "end_of_stream": False}))
+        assert p.has_next_page is True
+
+        req = Request(method="GET", url="https://x.zendesk.com/api/v2/incremental/users/cursor")
+        req.params = {"per_page": 1000, "start_time": 0}
+        p.update_request(req)
+        assert req.params["cursor"] == "u1"
+
     @pytest.mark.parametrize(
         "body",
         [
@@ -56,7 +75,7 @@ class TestZendeskTicketsCursorIncrementalPaginator:
         ],
     )
     def test_stops_pagination(self, body: dict[str, Any]) -> None:
-        p = ZendeskTicketsCursorIncrementalPaginator()
+        p = ZendeskCursorIncrementalPaginator()
 
         p.update_state(_make_response(body))
 
@@ -70,7 +89,7 @@ class TestZendeskTicketsCursorIncrementalPaginator:
         ],
     )
     def test_raises_on_invalid_response(self, body: dict[str, Any]) -> None:
-        p = ZendeskTicketsCursorIncrementalPaginator()
+        p = ZendeskCursorIncrementalPaginator()
 
         with pytest.raises(ValueError):
             p.update_state(_make_response(body))
@@ -79,7 +98,7 @@ class TestZendeskTicketsCursorIncrementalPaginator:
         """A cursor that never moves while end_of_stream is False is the time-based
         export's failure mode; fail loud so the activity retries instead of
         silently truncating data."""
-        p = ZendeskTicketsCursorIncrementalPaginator()
+        p = ZendeskCursorIncrementalPaginator()
 
         first = _make_response({"tickets": [{"id": 1}], "after_cursor": "abc123", "end_of_stream": False})
         p.update_state(first)
@@ -90,7 +109,7 @@ class TestZendeskTicketsCursorIncrementalPaginator:
             p.update_state(repeated)
 
     def test_paginates_across_multiple_pages(self) -> None:
-        p = ZendeskTicketsCursorIncrementalPaginator()
+        p = ZendeskCursorIncrementalPaginator()
         req = Request(method="GET", url="https://x.zendesk.com/api/v2/incremental/tickets/cursor")
         req.params = {"per_page": 1000, "start_time": 1591394586}
 
@@ -104,3 +123,83 @@ class TestZendeskTicketsCursorIncrementalPaginator:
 
         p.update_state(_make_response({"tickets": [{"id": 3}], "after_cursor": "cursor_3", "end_of_stream": True}))
         assert p.has_next_page is False
+
+
+class TestToZendeskStartTime:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            pytest.param(0, 0, id="initial_value_zero"),
+            pytest.param(1591394586, 1591394586, id="passthrough_int"),
+            pytest.param(datetime(2020, 6, 5, 21, 23, 6, tzinfo=UTC), 1591392186, id="aware_datetime"),
+            # Naive datetimes are interpreted as UTC.
+            pytest.param(datetime(2020, 6, 5, 21, 23, 6), 1591392186, id="naive_datetime_as_utc"),
+        ],
+    )
+    def test_converts_to_unix_epoch(self, value: Any, expected: int) -> None:
+        assert to_zendesk_start_time(value) == expected
+
+
+class TestIncrementalResourceWiring:
+    """The four endpoints that have a Zendesk Incremental Export API must declare a server-side
+    `start_time` cursor so incremental sync actually filters data, not just flips write disposition."""
+
+    @pytest.mark.parametrize(
+        "endpoint,expected_path,expected_paginator,cursor_path",
+        [
+            pytest.param(
+                "users", "/api/v2/incremental/users/cursor", ZendeskCursorIncrementalPaginator, "updated_at", id="users"
+            ),
+            pytest.param(
+                "organizations",
+                "/api/v2/incremental/organizations",
+                ZendeskIncrementalEndpointPaginator,
+                "updated_at",
+                id="organizations",
+            ),
+            pytest.param(
+                "ticket_events",
+                "/api/v2/incremental/ticket_events",
+                ZendeskIncrementalEndpointPaginator,
+                "created_at",
+                id="ticket_events",
+            ),
+            pytest.param(
+                "ticket_metric_events",
+                "/api/v2/incremental/ticket_metric_events",
+                ZendeskIncrementalEndpointPaginator,
+                "time",
+                id="ticket_metric_events",
+            ),
+        ],
+    )
+    def test_endpoint_declares_incremental_start_time(
+        self, endpoint: str, expected_path: str, expected_paginator: type, cursor_path: str
+    ) -> None:
+        resource = get_resource(endpoint, should_use_incremental_field=True)
+        endpoint_config = resource["endpoint"]
+
+        assert endpoint_config["path"] == expected_path
+        assert isinstance(endpoint_config["paginator"], expected_paginator)
+
+        start_time = endpoint_config["params"]["start_time"]
+        assert start_time["type"] == "incremental"
+        assert start_time["cursor_path"] == cursor_path
+        assert start_time["initial_value"] == 0
+        # Datetime cursors must convert to the Unix epoch Zendesk expects.
+        assert start_time["convert"] is to_zendesk_start_time
+
+    @pytest.mark.parametrize("endpoint", ["users", "organizations", "ticket_events", "ticket_metric_events"])
+    def test_write_disposition_follows_incremental_flag(self, endpoint: str) -> None:
+        incremental = get_resource(endpoint, should_use_incremental_field=True)
+        full_refresh = get_resource(endpoint, should_use_incremental_field=False)
+
+        assert incremental["write_disposition"] == {"disposition": "merge", "strategy": "upsert"}
+        assert full_refresh["write_disposition"] == "replace"
+
+    def test_incremental_fields_cover_incremental_endpoints(self) -> None:
+        # Every endpoint advertised as incremental must declare its incremental field(s).
+        for endpoint in INCREMENTAL_ENDPOINTS:
+            assert INCREMENTAL_FIELDS.get(endpoint), (
+                f"{endpoint} is in INCREMENTAL_ENDPOINTS but has no incremental field"
+            )
