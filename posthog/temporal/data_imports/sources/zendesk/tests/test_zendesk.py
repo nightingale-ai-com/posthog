@@ -66,6 +66,8 @@ class TestZendeskCursorIncrementalPaginator:
         req.params = {"per_page": 1000, "start_time": 0}
         p.update_request(req)
         assert req.params["cursor"] == "u1"
+        # The seed start_time must be dropped once we paginate by cursor, same as tickets.
+        assert "start_time" not in req.params
 
     @pytest.mark.parametrize(
         "body",
