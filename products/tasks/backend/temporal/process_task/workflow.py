@@ -22,6 +22,7 @@ from products.tasks.backend.temporal.process_task.activities.get_pr_context impo
 from .activities.cleanup_sandbox import CleanupSandboxInput, cleanup_sandbox
 from .activities.create_resume_snapshot import CreateResumeSnapshotInput, create_resume_snapshot
 from .activities.emit_progress_activity import EmitProgressInput, emit_progress_activity
+from .activities.evaluate_slack_streaming_gate import EvaluateSlackStreamingGateInput, evaluate_slack_streaming_gate
 from .activities.execute_task_in_sandbox import ExecuteTaskOutput
 from .activities.forward_pending_message import forward_pending_user_message
 from .activities.get_sandbox_for_repository import GetSandboxForRepositoryOutput
@@ -50,6 +51,7 @@ from .activities.start_agent_server import StartAgentServerInput, StartAgentServ
 from .activities.track_workflow_event import TrackWorkflowEventInput, track_workflow_event
 from .activities.update_task_run_status import UpdateTaskRunStatusInput, update_task_run_status
 from .credential_refresh import run_credential_refresh_loop
+from .slack_status_relay import SlackStatusRelayInput, SlackStatusRelayWorkflow
 
 
 @dataclass
@@ -156,6 +158,12 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         # exception handler onto the right card.
         self._current_progress_step: Optional[tuple[str, str, str]] = None
         self._pr_fingerprint: Optional[str] = None
+        # Slack agent-design streaming. Decided once at workflow start; if on,
+        # the legacy "Working on task…" placeholder is skipped and per-turn
+        # SlackStatusRelayWorkflow children are spawned in response to
+        # turn_started signals from relay_sandbox_events.
+        self._streaming_slack_status_enabled: bool = False
+        self._current_slack_relay_workflow_id: Optional[str] = None
 
     @property
     def context(self) -> TaskProcessingContext:
@@ -375,6 +383,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         try:
             self._context = await self._get_task_processing_context(input)
             self._posthog_mcp_scopes = input.posthog_mcp_scopes
+            self._streaming_slack_status_enabled = await self._evaluate_slack_streaming_gate()
             await self._update_task_run_status("in_progress")
 
             # Announce the first progress step immediately so the desktop card
@@ -391,7 +400,11 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                 },
             )
 
-            await self._post_slack_update()
+            # Streaming agent-design path owns the "agent is doing X" status
+            # via SlackStatusRelayWorkflow children; the legacy static
+            # placeholder would just clutter the thread above it.
+            if not self._streaming_slack_status_enabled:
+                await self._post_slack_update()
 
             sandbox_output = await self._get_sandbox_for_repository()
             sandbox_id = sandbox_output.sandbox_id
@@ -404,7 +417,8 @@ class ProcessTaskWorkflow(PostHogWorkflow):
             # pre-rollout histories still post here; new executions skip the
             # redundant update to keep determinism for in-flight workflows.
             if not workflow.patched(_PATCH_ID_DROP_SLACK_POST_AFTER_PROVISIONING):
-                await self._post_slack_update()
+                if not self._streaming_slack_status_enabled:
+                    await self._post_slack_update()
 
             # Start agent-server for direct connection from PostHog Code
             await self._emit_progress("agent", "in_progress", "Starting agent", "setup")
@@ -866,6 +880,8 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                 team_id=self.context.team_id,
                 distinct_id=self.context.distinct_id,
                 sandbox_id=sandbox_id,
+                slack_thread_context=self._slack_thread_context,
+                streaming_slack_status_enabled=self._streaming_slack_status_enabled,
             )
             await workflow.execute_activity(
                 relay_sandbox_events,
@@ -949,11 +965,93 @@ class ProcessTaskWorkflow(PostHogWorkflow):
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
+    async def _evaluate_slack_streaming_gate(self) -> bool:
+        if not self._slack_thread_context:
+            return False
+        integration_id = self._slack_thread_context.get("integration_id")
+        if not integration_id:
+            return False
+        try:
+            return await workflow.execute_activity(
+                evaluate_slack_streaming_gate,
+                EvaluateSlackStreamingGateInput(
+                    team_id=self.context.team_id,
+                    integration_id=int(integration_id),
+                ),
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except Exception:
+            # Fail closed — never silently enable streaming on a transient
+            # flag-service or DB outage.
+            workflow.logger.warning("slack_streaming_gate_eval_failed", extra={"run_id": self.context.run_id})
+            return False
+
     @temporalio.workflow.signal
     async def complete_task(self, status: str = "completed", error_message: Optional[str] = None) -> None:
         self._completion_status = status
         self._completion_error = error_message
         self._task_completed = True
+
+    # ──────────────────── Slack agent-design streaming ────────────────────
+    # Three signals fired by ``relay_sandbox_events`` on the per-turn lifetime
+    # of the agent. The parent never blocks on the child: each handler
+    # fire-and-forgets a ``signal_external_workflow`` / ``start_child_workflow``
+    # call so the relay activity isn't delayed by Slack-side latency.
+
+    @temporalio.workflow.signal
+    async def turn_started(self, payload: dict[str, Any]) -> None:
+        if not self._streaming_slack_status_enabled:
+            return
+        # Defensive: if a previous turn's child wasn't cleaned up (lost
+        # turn_completed signal), let it time out on its own — don't bother
+        # signaling it. New turn gets a fresh child.
+        slack_ctx = payload.get("slack_thread_context") or self._slack_thread_context or {}
+        if not slack_ctx:
+            return
+        relay_workflow_id = f"slack-status-relay-{self.context.run_id}-{workflow.uuid4()}"
+        self._current_slack_relay_workflow_id = relay_workflow_id
+        asyncio.ensure_future(
+            workflow.execute_child_workflow(
+                SlackStatusRelayWorkflow.run,
+                SlackStatusRelayInput(slack_thread_context=slack_ctx),
+                id=relay_workflow_id,
+                task_queue=workflow.info().task_queue,
+                parent_close_policy=ParentClosePolicy.ABANDON,
+                execution_timeout=timedelta(hours=1),
+            )
+        )
+
+    @temporalio.workflow.signal
+    async def agent_status_update(self, text: str) -> None:
+        if not self._streaming_slack_status_enabled or not self._current_slack_relay_workflow_id:
+            return
+        try:
+            handle = workflow.get_external_workflow_handle(self._current_slack_relay_workflow_id)
+            await handle.signal(SlackStatusRelayWorkflow.agent_status_update, text)
+        except Exception as e:
+            # Child might have already timed out / been GC'd. Drop the update
+            # rather than escalating — the rate-limit machinery elsewhere
+            # ensures the user still sees a reasonable status line.
+            workflow.logger.debug(
+                "slack_status_forward_failed",
+                extra={"run_id": self.context.run_id, "error": str(e)},
+            )
+
+    @temporalio.workflow.signal
+    async def turn_completed(self) -> None:
+        if not self._streaming_slack_status_enabled or not self._current_slack_relay_workflow_id:
+            return
+        relay_id = self._current_slack_relay_workflow_id
+        self._current_slack_relay_workflow_id = None
+        try:
+            handle = workflow.get_external_workflow_handle(relay_id)
+            await handle.signal(SlackStatusRelayWorkflow.complete_turn)
+        except Exception as e:
+            workflow.logger.debug(
+                "slack_status_complete_failed",
+                extra={"run_id": self.context.run_id, "error": str(e)},
+            )
 
     @temporalio.workflow.signal
     async def heartbeat(self, agent_active: bool = False) -> None:

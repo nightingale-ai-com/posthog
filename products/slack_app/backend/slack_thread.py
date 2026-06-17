@@ -129,6 +129,38 @@ class SlackThreadHandler:
         except Exception as e:
             logger.warning("slack_update_reaction_failed", error=str(e))
 
+    def update_status(self, text: str) -> None:
+        """Post or chat_update a single live agent-status message in the thread.
+
+        Finds the existing status message by ``PROGRESS_MESSAGE_MARKER`` (reuses the
+        same marker as ``post_or_update_progress`` so completion's ``_delete_progress_and_post``
+        cleans both up identically), updates it in place if present, or posts a new
+        one. ``text`` is the caller-supplied status string (e.g. ":pencil2: Editing
+        api.py"). The marker is embedded so the message can still be discovered on
+        subsequent updates.
+        """
+        # The marker stays in the text so subsequent calls (and the completion
+        # cleanup) can find this message — but it's rendered small so the visible
+        # status reads as the caller's text.
+        rendered = f"{text}\n_{PROGRESS_MESSAGE_MARKER}_"
+        try:
+            client = self._get_client()
+            progress_ts = self._find_progress_message_ts()
+            if progress_ts:
+                client.chat_update(
+                    channel=self.context.channel,
+                    ts=progress_ts,
+                    text=rendered,
+                )
+            else:
+                client.chat_postMessage(
+                    channel=self.context.channel,
+                    thread_ts=self.context.thread_ts,
+                    text=rendered,
+                )
+        except Exception as e:
+            logger.warning("slack_update_status_failed", error=str(e))
+
     def post_or_update_progress(
         self,
         stage: str,

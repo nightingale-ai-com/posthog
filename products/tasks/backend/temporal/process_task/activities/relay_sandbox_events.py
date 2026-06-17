@@ -4,6 +4,7 @@ import json
 import time
 import asyncio
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 import httpx_sse
@@ -49,6 +50,12 @@ class RelaySandboxEventsInput:
     team_id: int
     distinct_id: str
     sandbox_id: str | None = None
+    # Slack agent-design streaming. When ``streaming_slack_status_enabled`` is
+    # True and ``slack_thread_context`` is set, the relay forwards per-turn
+    # signals to the parent workflow so it can spawn / signal / shut down a
+    # per-turn ``SlackStatusRelayWorkflow`` child workflow.
+    slack_thread_context: dict[str, Any] | None = None
+    streaming_slack_status_enabled: bool = False
 
 
 @activity.defn
@@ -118,6 +125,8 @@ async def relay_sandbox_events(input: RelaySandboxEventsInput) -> None:
             background_logs_enabled=background_logs_enabled,
             task_run=task_run,
             inactivity_timeout_seconds=inactivity_timeout_seconds,
+            slack_thread_context=input.slack_thread_context,
+            streaming_slack_status_enabled=input.streaming_slack_status_enabled,
         )
     except asyncio.CancelledError:
         logger.info("relay_sandbox_events_cancelled", run_id=input.run_id)
@@ -239,6 +248,8 @@ async def _relay_loop(
     background_logs_enabled: bool = False,
     task_run: TaskRunModel | None = None,
     inactivity_timeout_seconds: float = INACTIVITY_TIMEOUT_DEFAULT_SECONDS,
+    slack_thread_context: dict[str, Any] | None = None,
+    streaming_slack_status_enabled: bool = False,
 ) -> None:
     """Connect to sandbox SSE and relay events to Redis. Reconnects on transient failures."""
     reconnect_count = 0
@@ -261,6 +272,10 @@ async def _relay_loop(
     last_workflow_signal: list[float] = [0.0]  # shared with background heartbeat
     agent_active: list[bool] = [True]  # agent is working; False after end_turn
     last_audit_ts_ns: list[int] = [0]  # track last agentsh audit timestamp
+    # Tracks whether the parent workflow has been told about the current
+    # agent turn. Drives turn_started / turn_completed signal pairs that
+    # bracket the lifetime of the Slack status relay child workflow.
+    slack_turn_active: list[bool] = [False]
 
     stop_heartbeat = asyncio.Event()
     heartbeat_task = asyncio.create_task(
@@ -326,8 +341,37 @@ async def _relay_loop(
                                     # does sync Redis (cache.add) and a potential network call to
                                     # the feature-flag service.
                                     asyncio.create_task(asyncio.to_thread(_safe_dispatch_awaiting_input, task_run))
+                                if (
+                                    streaming_slack_status_enabled
+                                    and slack_turn_active[0]
+                                    and workflow_handle is not None
+                                ):
+                                    slack_turn_active[0] = False
+                                    asyncio.create_task(_signal_safely(workflow_handle, "turn_completed"))
                             elif not agent_active[0] and _is_session_update(event_data):
                                 agent_active[0] = True
+
+                            # Slack agent-design streaming hooks. The first
+                            # session/update of a turn opens a child relay
+                            # workflow; each _posthog/status notification feeds
+                            # it a live status text; the matching end_of_turn
+                            # above closes it.
+                            if streaming_slack_status_enabled and workflow_handle is not None:
+                                if not slack_turn_active[0] and _is_session_update(event_data):
+                                    slack_turn_active[0] = True
+                                    asyncio.create_task(
+                                        _signal_safely(
+                                            workflow_handle,
+                                            "turn_started",
+                                            arg={"slack_thread_context": slack_thread_context or {}},
+                                        )
+                                    )
+                                if slack_turn_active[0] and _is_status_notification(event_data):
+                                    text = _extract_status_text(event_data)
+                                    if text:
+                                        asyncio.create_task(
+                                            _signal_safely(workflow_handle, "agent_status_update", arg=text)
+                                        )
 
                             now = time.monotonic()
                             if (
@@ -412,6 +456,42 @@ def _is_session_update(event_data: dict) -> bool:
         return False
     notification = event_data.get("notification", {})
     return notification.get("method") == "session/update"
+
+
+def _is_status_notification(event_data: dict) -> bool:
+    """Check if an event is the agent's ``_posthog/status`` notification."""
+    if event_data.get("type") != "notification":
+        return False
+    notification = event_data.get("notification", {})
+    return notification.get("method") == "_posthog/status"
+
+
+def _extract_status_text(event_data: dict) -> str | None:
+    """Pull the human-readable status text out of a ``_posthog/status`` notification."""
+    notification = event_data.get("notification", {})
+    params = notification.get("params") or {}
+    text = params.get("text")
+    return text if isinstance(text, str) and text else None
+
+
+async def _signal_safely(
+    workflow_handle: temporalio.client.WorkflowHandle,
+    signal_name: str,
+    arg: Any = None,
+) -> None:
+    """Fire-and-forget signal to the parent workflow.
+
+    Failures (parent gone, network blip) must never break the relay loop —
+    log at warning and continue. Used for the Slack agent-design signals
+    (``turn_started`` / ``agent_status_update`` / ``turn_completed``).
+    """
+    try:
+        if arg is None:
+            await workflow_handle.signal(signal_name)
+        else:
+            await workflow_handle.signal(signal_name, arg=arg)
+    except Exception as e:
+        logger.warning("relay_workflow_signal_failed", signal=signal_name, error=str(e))
 
 
 def _is_keepalive_event(event_data: dict) -> bool:

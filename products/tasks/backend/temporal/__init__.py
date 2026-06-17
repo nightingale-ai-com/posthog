@@ -35,12 +35,16 @@ from .process_task.activities import (
     track_workflow_event,
     update_task_run_status,
 )
+from .process_task.activities.evaluate_slack_streaming_gate import evaluate_slack_streaming_gate
 from .process_task.activities.get_pr_context import get_pr_context
+from .process_task.activities.update_slack_status import update_slack_status
+from .process_task.slack_status_relay import SlackStatusRelayWorkflow
 from .process_task.workflow import ProcessTaskWorkflow
 from .slack_relay import PostHogCodeAgentRelayWorkflow, relay_slack_message
 
 WORKFLOWS = [
     ProcessTaskWorkflow,
+    SlackStatusRelayWorkflow,
     CreateSnapshotForRepositoryWorkflow,
     PostHogCodeAgentRelayWorkflow,
     RunTaskAutomationWorkflow,
@@ -72,6 +76,8 @@ ACTIVITIES = [
     update_task_run_status,
     get_pr_context,
     relay_slack_message,
+    evaluate_slack_streaming_gate,
+    update_slack_status,
     run_task_automation_activity,
     # create_snapshot activities
     get_snapshot_context,
