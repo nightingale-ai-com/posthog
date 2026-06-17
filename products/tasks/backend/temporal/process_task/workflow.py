@@ -977,6 +977,7 @@ class ProcessTaskWorkflow(PostHogWorkflow):
                 EvaluateSlackStreamingGateInput(
                     team_id=self.context.team_id,
                     integration_id=int(integration_id),
+                    run_id=self.context.run_id,
                 ),
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=RetryPolicy(maximum_attempts=2),

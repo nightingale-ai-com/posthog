@@ -166,6 +166,17 @@ def _enqueue_pending_delivery_failure_relay(task_run: Any, user_message_ts: str 
 
 
 def _enqueue_pending_reply_relay(task_run: Any, user_message_ts: str | None, command_result_data: Any) -> None:
+    # When the Slack agent-design streaming path is active for this run, the
+    # follow-up reply has already streamed into the per-turn plan-block message
+    # via ``SlackStatusRelayWorkflow``. Posting it again here would duplicate
+    # the narrative as a separate thread message — skip.
+    from products.tasks.backend.temporal.process_task.activities.evaluate_slack_streaming_gate import (
+        STREAMING_STATE_KEY,
+    )
+
+    if bool((task_run.state or {}).get(STREAMING_STATE_KEY)):
+        return
+
     from products.tasks.backend.temporal.client import execute_posthog_code_agent_relay_workflow
 
     reply_text = _extract_assistant_text_from_command_result(
