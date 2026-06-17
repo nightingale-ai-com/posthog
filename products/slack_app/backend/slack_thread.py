@@ -187,34 +187,32 @@ class SlackThreadHandler:
             logger.warning("slack_status_stream_start_failed", error=str(e))
             return None
 
-    def append_status_step(
+    def append_status_chunks(
         self,
         ts: str,
-        complete_task_id: str | None,
-        complete_task_title: str | None,
-        complete_task_details: str | None,
-        new_task_id: str | None,
-        new_task_title: str | None,
-        new_task_details: str | None,
+        task_updates: list[dict[str, Any]],
         markdown_text: str | None = None,
     ) -> None:
-        """Append a plan-block step transition (and optional narrative text).
+        """Append an ordered batch of plan-block step transitions to a stream.
 
-        Sends in one ``chat.appendStream`` call:
+        ``task_updates`` is a list of ``{id, title, status, details}`` dicts
+        in the order they should appear in the plan block. A burst of tool
+        calls inside one debounce window flushes as a single ``appendStream``
+        carrying all transitions — multiple identical-name tool calls each get
+        their own step (distinct ``id`` per call) instead of collapsing.
 
-        * a ``task_update`` chunk marking the previous step ``complete`` (when
-          ``complete_task_id``/``title`` are given)
-        * a ``task_update`` chunk marking the new step ``in_progress`` (when
-          ``new_task_id``/``title`` are given)
-        * a trailing ``markdown_text`` chunk with the agent's narrative
-          (when ``markdown_text`` is set) — this becomes the streaming body
-          text under the plan block.
+        The optional ``markdown_text`` chunk is appended at the end of the same
+        ``chat.appendStream`` call, so narrative body text rides along with
+        the plan-block transitions on every flush.
         """
         chunks: list[dict[str, Any]] = []
-        if complete_task_id and complete_task_title:
-            chunks.append(_task_update_chunk(complete_task_id, complete_task_title, "complete", complete_task_details))
-        if new_task_id and new_task_title:
-            chunks.append(_task_update_chunk(new_task_id, new_task_title, "in_progress", new_task_details))
+        for t in task_updates:
+            task_id = t.get("id")
+            title = t.get("title")
+            status = t.get("status")
+            if not task_id or not title or not status:
+                continue
+            chunks.append(_task_update_chunk(str(task_id), str(title), str(status), t.get("details")))
         if markdown_text:
             chunks.append({"type": "markdown_text", "text": markdown_text[:12000]})
         if not chunks:

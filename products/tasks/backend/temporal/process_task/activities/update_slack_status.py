@@ -27,6 +27,21 @@ logger = get_logger(__name__)
 
 
 @dataclass
+class TaskUpdateChunk:
+    """One step in a plan-block transition.
+
+    Represented as a flat dataclass (not nested in the slack_thread module)
+    so Temporal can serialize it across the workflow/activity boundary
+    without pulling Slack SDK types into the workflow sandbox.
+    """
+
+    id: str
+    title: str
+    status: str  # "in_progress" | "complete" — see Slack chat.appendStream docs.
+    details: Optional[str] = None
+
+
+@dataclass
 class StartSlackStatusStreamInput:
     slack_thread_context: dict[str, Any]
     first_task_id: str
@@ -38,12 +53,7 @@ class StartSlackStatusStreamInput:
 class AppendSlackStatusStepInput:
     slack_thread_context: dict[str, Any]
     ts: str
-    complete_task_id: Optional[str]
-    complete_task_title: Optional[str]
-    complete_task_details: Optional[str]
-    new_task_id: Optional[str]
-    new_task_title: Optional[str]
-    new_task_details: Optional[str]
+    task_updates: list[TaskUpdateChunk]
     markdown_text: Optional[str] = None
 
 
@@ -85,14 +95,17 @@ def append_slack_status_step(input: AppendSlackStatusStepInput) -> None:
 
     try:
         context = SlackThreadContext.from_dict(input.slack_thread_context)
-        SlackThreadHandler(context).append_status_step(
+        SlackThreadHandler(context).append_status_chunks(
             ts=input.ts,
-            complete_task_id=input.complete_task_id,
-            complete_task_title=input.complete_task_title,
-            complete_task_details=input.complete_task_details,
-            new_task_id=input.new_task_id,
-            new_task_title=input.new_task_title,
-            new_task_details=input.new_task_details,
+            task_updates=[
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "status": t.status,
+                    "details": t.details,
+                }
+                for t in input.task_updates
+            ],
             markdown_text=input.markdown_text,
         )
     except Exception as e:

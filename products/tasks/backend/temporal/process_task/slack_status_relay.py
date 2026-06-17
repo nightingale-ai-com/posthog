@@ -49,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
         AppendSlackStatusStepInput,
         StartSlackStatusStreamInput,
         StopSlackStatusStreamInput,
+        TaskUpdateChunk,
         append_slack_status_step,
         start_slack_status_stream,
         stop_slack_status_stream,
@@ -76,7 +77,11 @@ class SlackStatusRelayInput:
 @workflow.defn(name="slack-status-relay")
 class SlackStatusRelayWorkflow(PostHogWorkflow):
     def __init__(self) -> None:
-        self._pending_step: Optional[PendingStep] = None
+        # Queue of distinct steps observed since the last flush. Multiple
+        # identical-name tool calls each enqueue a separate entry so the
+        # plan block shows them as separate transitions (each with its own
+        # generated id) rather than collapsing into one.
+        self._pending_steps: list[PendingStep] = []
         self._pending_markdown_buffer: str = ""
         self._stream_ts: Optional[str] = None
         self._current_task_id: Optional[str] = None
@@ -87,22 +92,28 @@ class SlackStatusRelayWorkflow(PostHogWorkflow):
 
     @workflow.signal
     async def agent_status_update(self, payload: dict[str, Any]) -> None:
-        """Queue a plan-block step transition.
+        """Enqueue a plan-block step transition.
 
-        ``payload``: ``{"title": str, "details": str | None}``. Accepts the old
-        ``str`` shape too for compatibility with in-flight relays that emit
-        the pre-enrichment payload.
+        Each ``_posthog/status`` notification is a distinct tool start (the
+        agent emits one per ``!alreadyCached`` tool_use), so every signal
+        becomes a separate step — we never deduplicate by title/details.
+
+        ``payload``: ``{"title": str, "details": str | None}``. Accepts the
+        old ``str`` shape too for compatibility with in-flight relays that
+        emit the pre-enrichment payload.
         """
         if isinstance(payload, str):
-            self._pending_step = PendingStep(title=payload, details=None)
+            self._pending_steps.append(PendingStep(title=payload, details=None))
             return
         title = payload.get("title") or payload.get("text")
         if not isinstance(title, str) or not title:
             return
         details = payload.get("details")
-        self._pending_step = PendingStep(
-            title=title,
-            details=details if isinstance(details, str) and details else None,
+        self._pending_steps.append(
+            PendingStep(
+                title=title,
+                details=details if isinstance(details, str) and details else None,
+            )
         )
 
     @workflow.signal
@@ -117,7 +128,56 @@ class SlackStatusRelayWorkflow(PostHogWorkflow):
         self._turn_complete = True
 
     def _has_pending(self) -> bool:
-        return self._pending_step is not None or bool(self._pending_markdown_buffer)
+        return bool(self._pending_steps) or bool(self._pending_markdown_buffer)
+
+    def _build_transition_chunks(self, steps: list[PendingStep]) -> list[TaskUpdateChunk]:
+        """Build the ordered transition chunks for one flush.
+
+        Pattern (in order in the resulting plan block):
+
+        1. The previously-active step → ``complete`` (if there was one).
+        2. Every intermediate queued step → ``complete`` (each is a tool
+           that started and whose successor has already started, so by the
+           time we flush they're definitionally finished).
+        3. The last queued step → ``in_progress`` (becomes the new current).
+
+        Also mutates ``self._current_*`` to point at the new in_progress step.
+        """
+        chunks: list[TaskUpdateChunk] = []
+        if not steps:
+            return chunks
+        if self._current_task_id and self._current_task_title:
+            chunks.append(
+                TaskUpdateChunk(
+                    id=self._current_task_id,
+                    title=self._current_task_title,
+                    status="complete",
+                    details=self._current_task_details,
+                )
+            )
+        for s in steps[:-1]:
+            chunks.append(
+                TaskUpdateChunk(
+                    id=str(workflow.uuid4()),
+                    title=s.title,
+                    status="complete",
+                    details=s.details,
+                )
+            )
+        last = steps[-1]
+        last_id = str(workflow.uuid4())
+        chunks.append(
+            TaskUpdateChunk(
+                id=last_id,
+                title=last.title,
+                status="in_progress",
+                details=last.details,
+            )
+        )
+        self._current_task_id = last_id
+        self._current_task_title = last.title
+        self._current_task_details = last.details
+        return chunks
 
     @workflow.run
     async def run(self, input: SlackStatusRelayInput) -> None:
@@ -144,38 +204,33 @@ class SlackStatusRelayWorkflow(PostHogWorkflow):
                 if elapsed < STATUS_MIN_INTERVAL_SECONDS:
                     await workflow.sleep(STATUS_MIN_INTERVAL_SECONDS - elapsed)
 
-                step = self._pending_step
-                self._pending_step = None
+                steps = self._pending_steps
+                self._pending_steps = []
                 markdown = self._pending_markdown_buffer
                 self._pending_markdown_buffer = ""
 
-                step_changed = step is not None and (
-                    step.title != self._current_task_title or step.details != self._current_task_details
-                )
-                if not step_changed and not markdown:
+                if not steps and not markdown:
                     continue
 
                 self._last_dispatched_at = workflow.now().timestamp()
 
                 if self._stream_ts is None:
-                    # First flush of the turn — must include a step to seed
-                    # the plan block. If a real ``agent_status_update`` step
-                    # arrived, use it. If we only have narrative text (the
-                    # agent isn't emitting ``_posthog/status`` notifications,
-                    # e.g. when the sandbox runs an older ``@posthog/agent``
-                    # that predates PR A), synthesize a generic ``Thinking``
-                    # step so the stream still opens and the markdown body can
-                    # render — otherwise the buffer never drains.
-                    if step is None:
-                        step = PendingStep(title="Thinking", details=None)
+                    # First flush — must include at least one step to seed
+                    # the plan block. If only narrative is pending (the agent
+                    # isn't emitting ``_posthog/status``, e.g. older sandbox
+                    # ``@posthog/agent`` predating PR A), synthesize a generic
+                    # ``Thinking`` step so the body can still stream.
+                    if not steps:
+                        steps = [PendingStep(title="Thinking", details=None)]
+                    first_step = steps[0]
                     first_id = str(workflow.uuid4())
                     self._stream_ts = await workflow.execute_activity(
                         start_slack_status_stream,
                         StartSlackStatusStreamInput(
                             slack_thread_context=input.slack_thread_context,
                             first_task_id=first_id,
-                            first_task_title=step.title,
-                            first_task_details=step.details,
+                            first_task_title=first_step.title,
+                            first_task_details=first_step.details,
                         ),
                         start_to_close_timeout=timedelta(seconds=10),
                         retry_policy=RetryPolicy(maximum_attempts=3),
@@ -184,58 +239,36 @@ class SlackStatusRelayWorkflow(PostHogWorkflow):
                         # Slack rejected the stream open — exit this turn.
                         return
                     self._current_task_id = first_id
-                    self._current_task_title = step.title
-                    self._current_task_details = step.details
-                    if markdown:
-                        # Stream the buffered narrative right after seeding.
+                    self._current_task_title = first_step.title
+                    self._current_task_details = first_step.details
+                    remaining = steps[1:]
+                    if remaining or markdown:
                         await workflow.execute_activity(
                             append_slack_status_step,
                             AppendSlackStatusStepInput(
                                 slack_thread_context=input.slack_thread_context,
                                 ts=self._stream_ts,
-                                complete_task_id=None,
-                                complete_task_title=None,
-                                complete_task_details=None,
-                                new_task_id=None,
-                                new_task_title=None,
-                                new_task_details=None,
-                                markdown_text=markdown,
+                                task_updates=self._build_transition_chunks(remaining),
+                                markdown_text=markdown or None,
                             ),
                             start_to_close_timeout=timedelta(seconds=10),
                             retry_policy=RetryPolicy(maximum_attempts=3),
                         )
                     continue
 
-                # Subsequent flush — single appendStream covers step transition
-                # (if any) and narrative text (if any).
-                if step_changed and step is not None:
-                    new_id = str(workflow.uuid4())
-                    new_title: Optional[str] = step.title
-                    new_details: Optional[str] = step.details
-                else:
-                    new_id = None
-                    new_title = None
-                    new_details = None
+                # Subsequent flush — single appendStream covers any number of
+                # step transitions plus the narrative text.
                 await workflow.execute_activity(
                     append_slack_status_step,
                     AppendSlackStatusStepInput(
                         slack_thread_context=input.slack_thread_context,
                         ts=self._stream_ts,
-                        complete_task_id=self._current_task_id if step_changed else None,
-                        complete_task_title=self._current_task_title if step_changed else None,
-                        complete_task_details=self._current_task_details if step_changed else None,
-                        new_task_id=new_id,
-                        new_task_title=new_title,
-                        new_task_details=new_details,
+                        task_updates=self._build_transition_chunks(steps),
                         markdown_text=markdown or None,
                     ),
                     start_to_close_timeout=timedelta(seconds=10),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
-                if step_changed and step is not None:
-                    self._current_task_id = new_id
-                    self._current_task_title = step.title
-                    self._current_task_details = step.details
         finally:
             if self._stream_ts is not None:
                 await workflow.execute_activity(
