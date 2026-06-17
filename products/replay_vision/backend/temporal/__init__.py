@@ -35,11 +35,9 @@ from products.replay_vision.backend.temporal.reconciler import ReconcileScannerS
 from products.replay_vision.backend.temporal.sweep_workflow import SweepScannerWorkflow
 from products.replay_vision.backend.temporal.vision_actions import (
     ProcessVisionActionWorkflow,
-    ScheduleAllVisionActionsWorkflow,
-    advance_next_run_at_activity,
     create_vision_action_run_activity,
     emit_action_ready_activity,
-    fetch_due_vision_actions_activity,
+    evaluate_due_vision_actions_activity,
     synthesize_action_activity,
     update_vision_action_run_activity,
     validate_vision_action_activity,
@@ -52,7 +50,6 @@ WORKFLOWS = [
     RefreshScannerEstimatesWorkflow,
     ReplayVisionGeminiCleanupSweepWorkflow,
     SweepScannerWorkflow,
-    ScheduleAllVisionActionsWorkflow,
     ProcessVisionActionWorkflow,
 ]
 ACTIVITIES: list[Callable[..., Any]] = [
@@ -80,13 +77,12 @@ ACTIVITIES: list[Callable[..., Any]] = [
     list_stale_scanner_estimates_activity,
     refresh_scanner_estimate_activity,
     sweep_gemini_files_activity,
-    fetch_due_vision_actions_activity,
+    evaluate_due_vision_actions_activity,
     create_vision_action_run_activity,
     validate_vision_action_activity,
     synthesize_action_activity,
     emit_action_ready_activity,
     update_vision_action_run_activity,
-    advance_next_run_at_activity,
 ]
 
 __all__ = [
@@ -97,12 +93,10 @@ __all__ = [
     "ReconcileScannerSchedulesWorkflow",
     "RefreshScannerEstimatesWorkflow",
     "ReplayVisionGeminiCleanupSweepWorkflow",
-    "ScheduleAllVisionActionsWorkflow",
     "SweepScannerWorkflow",
-    "advance_next_run_at_activity",
     "create_vision_action_run_activity",
     "emit_action_ready_activity",
-    "fetch_due_vision_actions_activity",
+    "evaluate_due_vision_actions_activity",
     "synthesize_action_activity",
     "update_vision_action_run_activity",
     "validate_vision_action_activity",
