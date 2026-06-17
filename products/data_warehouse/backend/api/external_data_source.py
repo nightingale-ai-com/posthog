@@ -965,14 +965,17 @@ class ExternalDataSourceSerializers(UserAccessControlSerializerMixin, serializer
 
         # Typeform: switching response types changes the responses cursor/partition field, which
         # only takes effect on a rebuilt table — so force a full refresh of the responses schema.
-        reset_typeform_schemas: list[ExternalDataSchema] = []
+        # Decide here, but apply the reset only once the source save succeeds (see below) so a
+        # later validation failure can't leave the schemas reset against an unchanged source.
+        typeform_reset_include_partials: bool | None = None
         if detect_typeform_response_types_transition(
             source_type=source_type_model,
             existing_job_inputs=existing_job_inputs,
             incoming_job_inputs=incoming_job_inputs,
         ):
-            include_partials = _typeform_response_types(incoming_job_inputs) != RESPONSE_TYPE_COMPLETED_ONLY
-            reset_typeform_schemas = apply_typeform_response_types_reset(instance, include_partials=include_partials)
+            typeform_reset_include_partials = (
+                _typeform_response_types(incoming_job_inputs) != RESPONSE_TYPE_COMPLETED_ONLY
+            )
 
         source_config: Config = source.parse_config(new_job_inputs)
         validated_data["job_inputs"] = source_config.to_dict()
@@ -996,7 +999,13 @@ class ExternalDataSourceSerializers(UserAccessControlSerializerMixin, serializer
                     fallback=instance.connection_metadata,
                 )
 
-        updated_source: ExternalDataSource = super().update(instance, validated_data)
+        reset_typeform_schemas: list[ExternalDataSchema] = []
+        with transaction.atomic():
+            updated_source: ExternalDataSource = super().update(instance, validated_data)
+            if typeform_reset_include_partials is not None:
+                reset_typeform_schemas = apply_typeform_response_types_reset(
+                    instance, include_partials=typeform_reset_include_partials
+                )
 
         # Kick off the resync now that the reset flags are persisted; the flag alone only takes
         # effect on the next scheduled run. Best-effort: a missing schedule (never-synced schema)
