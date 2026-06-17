@@ -248,7 +248,10 @@ class SlackThreadHandler:
                 _task_update_chunk(complete_task_id, complete_task_title, "complete", complete_task_details)
             )
         if self.context.mentioning_slack_user_id:
-            final_chunks.append({"type": "markdown_text", "text": f"<@{self.context.mentioning_slack_user_id}>"})
+            # Leading double-newline so the mention lands on its own line
+            # rather than smushing into the trailing punctuation of the last
+            # streamed prose chunk (e.g. "(Mon–Sun)?<@U…>" → "(Mon–Sun)?\n\n<@U…>").
+            final_chunks.append({"type": "markdown_text", "text": f"\n\n<@{self.context.mentioning_slack_user_id}>"})
         if final_chunks:
             try:
                 self._get_client().chat_appendStream(
