@@ -449,6 +449,7 @@ export const mcpDashboardOverviewLogic = kea<mcpDashboardOverviewLogicType>([
     })),
     actions({
         setDateFilter: (dateFrom: string | null, dateTo: string | null) => ({ dateFrom, dateTo }),
+        setFilterTestAccounts: (filterTestAccounts: boolean) => ({ filterTestAccounts }),
         reloadAll: true,
     }),
     reducers({
@@ -456,6 +457,12 @@ export const mcpDashboardOverviewLogic = kea<mcpDashboardOverviewLogicType>([
             DEFAULT_DATE_FILTER,
             {
                 setDateFilter: (_, { dateFrom, dateTo }): DateFilter => ({ dateFrom, dateTo }),
+            },
+        ],
+        filterTestAccounts: [
+            false,
+            {
+                setFilterTestAccounts: (_, { filterTestAccounts }): boolean => filterTestAccounts,
             },
         ],
     }),
@@ -585,9 +592,10 @@ export const mcpDashboardOverviewLogic = kea<mcpDashboardOverviewLogicType>([
     })),
     selectors({
         queryFilters: [
-            (s) => [s.dateFilter],
-            (dateFilter: DateFilter): HogQLFilters => ({
+            (s) => [s.dateFilter, s.filterTestAccounts],
+            (dateFilter: DateFilter, filterTestAccounts: boolean): HogQLFilters => ({
                 dateRange: { date_from: dateFilter.dateFrom, date_to: dateFilter.dateTo },
+                filterTestAccounts,
             }),
         ],
         interval: [
@@ -626,6 +634,9 @@ export const mcpDashboardOverviewLogic = kea<mcpDashboardOverviewLogicType>([
         setDateFilter: () => {
             actions.reloadAll()
         },
+        setFilterTestAccounts: () => {
+            actions.reloadAll()
+        },
         reloadAll: () => {
             actions.loadKPIs()
             actions.loadToolRows()
@@ -635,8 +646,8 @@ export const mcpDashboardOverviewLogic = kea<mcpDashboardOverviewLogicType>([
             actions.loadToolDailyRows()
         },
     })),
-    actionToUrl(({ values }) => ({
-        setDateFilter: () => {
+    actionToUrl(({ values }) => {
+        const syncUrl = (): [string, Record<string, any>, Record<string, any>, { replace: boolean }] => {
             const { currentLocation } = router.values
             const searchParams = { ...currentLocation.searchParams }
             if (values.dateFilter.dateFrom) {
@@ -649,19 +660,36 @@ export const mcpDashboardOverviewLogic = kea<mcpDashboardOverviewLogicType>([
             } else {
                 delete searchParams.date_to
             }
+            if (values.filterTestAccounts) {
+                searchParams.filter_test_accounts = true
+            } else {
+                delete searchParams.filter_test_accounts
+            }
             return [currentLocation.pathname, searchParams, currentLocation.hashParams, { replace: true }]
-        },
-    })),
+        }
+        return {
+            setDateFilter: syncUrl,
+            setFilterTestAccounts: syncUrl,
+        }
+    }),
     urlToAction(({ actions, values, cache }) => ({
         [urls.mcpAnalyticsDashboard()]: (_, searchParams) => {
             const dateFrom =
                 typeof searchParams.date_from === 'string' ? searchParams.date_from : DEFAULT_DATE_FILTER.dateFrom
             const dateTo = typeof searchParams.date_to === 'string' ? searchParams.date_to : null
-            if (dateFrom !== values.dateFilter.dateFrom || dateTo !== values.dateFilter.dateTo) {
-                // setDateFilter's listener reloads everything.
+            const filterTestAccounts =
+                searchParams.filter_test_accounts === true || searchParams.filter_test_accounts === 'true'
+            const dateChanged = dateFrom !== values.dateFilter.dateFrom || dateTo !== values.dateFilter.dateTo
+            const filterChanged = filterTestAccounts !== values.filterTestAccounts
+            // setDateFilter / setFilterTestAccounts each reload via their listeners.
+            if (dateChanged) {
                 actions.setDateFilter(dateFrom, dateTo)
-            } else if (!cache.hasLoaded) {
-                // URL already matches state (e.g. default window) and afterMount deferred — load once here.
+            }
+            if (filterChanged) {
+                actions.setFilterTestAccounts(filterTestAccounts)
+            }
+            // URL already matches state (e.g. default filters) and afterMount deferred — load once.
+            if (!dateChanged && !filterChanged && !cache.hasLoaded) {
                 actions.reloadAll()
             }
             cache.hasLoaded = true
@@ -673,7 +701,10 @@ export const mcpDashboardOverviewLogic = kea<mcpDashboardOverviewLogicType>([
         // tests, where urlToAction never fires). The cache.hasLoaded guard keeps a
         // deep-linked load from firing twice.
         const { searchParams } = router.values
-        const hasUrlFilters = typeof searchParams.date_from === 'string' || typeof searchParams.date_to === 'string'
+        const hasUrlFilters =
+            typeof searchParams.date_from === 'string' ||
+            typeof searchParams.date_to === 'string' ||
+            typeof searchParams.filter_test_accounts !== 'undefined'
         if (!hasUrlFilters && !cache.hasLoaded) {
             cache.hasLoaded = true
             actions.reloadAll()
