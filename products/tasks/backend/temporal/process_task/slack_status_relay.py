@@ -158,12 +158,16 @@ class SlackStatusRelayWorkflow(PostHogWorkflow):
                 self._last_dispatched_at = workflow.now().timestamp()
 
                 if self._stream_ts is None:
-                    # First flush of the turn — must include a step to seed the
-                    # plan block. If we only have markdown so far, drop it and
-                    # wait; the agent will produce a tool step shortly.
+                    # First flush of the turn — must include a step to seed
+                    # the plan block. If a real ``agent_status_update`` step
+                    # arrived, use it. If we only have narrative text (the
+                    # agent isn't emitting ``_posthog/status`` notifications,
+                    # e.g. when the sandbox runs an older ``@posthog/agent``
+                    # that predates PR A), synthesize a generic ``Thinking``
+                    # step so the stream still opens and the markdown body can
+                    # render — otherwise the buffer never drains.
                     if step is None:
-                        self._pending_markdown_buffer = markdown + self._pending_markdown_buffer
-                        continue
+                        step = PendingStep(title="Thinking", details=None)
                     first_id = str(workflow.uuid4())
                     self._stream_ts = await workflow.execute_activity(
                         start_slack_status_stream,
