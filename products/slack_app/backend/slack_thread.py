@@ -235,18 +235,31 @@ class SlackThreadHandler:
         complete_task_title: str | None = None,
         complete_task_details: str | None = None,
     ) -> None:
-        """Mark the current step complete (if any) and close the status stream."""
+        """Mark the current step complete (if any) and close the status stream.
+
+        Right before ``chat.stopStream``, append a ``markdown_text`` chunk with
+        the original mention author's handle (``<@USER_ID>``) so they receive a
+        Slack notification when their answer is ready. The mention rides on the
+        same streamed message — no separate ping post — and fires once on
+        commit because Slack treats the streamed message as a single entity
+        for notification purposes.
+        """
+        final_chunks: list[dict[str, Any]] = []
         if complete_task_id and complete_task_title:
+            final_chunks.append(
+                _task_update_chunk(complete_task_id, complete_task_title, "complete", complete_task_details)
+            )
+        if self.context.mentioning_slack_user_id:
+            final_chunks.append({"type": "markdown_text", "text": f"<@{self.context.mentioning_slack_user_id}>"})
+        if final_chunks:
             try:
                 self._get_client().chat_appendStream(
                     channel=self.context.channel,
                     ts=ts,
-                    chunks=[
-                        _task_update_chunk(complete_task_id, complete_task_title, "complete", complete_task_details)
-                    ],
+                    chunks=final_chunks,
                 )
             except Exception as e:
-                logger.warning("slack_status_stream_final_complete_failed", error=str(e))
+                logger.warning("slack_status_stream_final_append_failed", error=str(e))
         try:
             self._get_client().chat_stopStream(
                 channel=self.context.channel,
