@@ -1881,6 +1881,21 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         text = request.validated_data["text"].strip()
         if not text:
             return Response({"status": "skipped"})
+        kind = request.validated_data.get("kind", "reply")
+
+        # When the Slack agent-design streaming path is active for this run, the
+        # agent's reply is already carried in the per-turn streamed plan-block
+        # message — posting it again here would duplicate the entire narrative
+        # as a separate thread message. Questions are different: they're a
+        # pause-and-wait interaction the user has to see and act on, so they
+        # always relay.
+        if kind == "reply":
+            from products.tasks.backend.temporal.process_task.activities.evaluate_slack_streaming_gate import (
+                STREAMING_STATE_KEY,
+            )
+
+            if bool((task_run.state or {}).get(STREAMING_STATE_KEY)):
+                return Response({"status": "skipped"})
 
         try:
             relay_id = execute_posthog_code_agent_relay_workflow(

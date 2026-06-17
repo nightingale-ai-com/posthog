@@ -542,6 +542,16 @@ class TaskRunRelayMessageResponseSerializer(serializers.Serializer):
 
 class TaskRunRelayMessageRequestSerializer(serializers.Serializer):
     text = serializers.CharField(max_length=10000)
+    kind = serializers.ChoiceField(
+        choices=[("reply", "reply"), ("question", "question")],
+        required=False,
+        default="reply",
+        help_text=(
+            "Discriminator for the relay's purpose. 'reply' is suppressed when the run is using "
+            "the Slack agent-design streaming path (the streamed message already carries the "
+            "agent's reply). 'question' is always relayed — the user needs to see it to respond."
+        ),
+    )
 
 
 class TaskRunArtifactUploadSerializer(serializers.Serializer):
