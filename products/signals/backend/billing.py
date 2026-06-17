@@ -40,12 +40,9 @@ SIGNALS_PRIORITY_CREDITS: dict[str, int] = {
 }
 
 
-def _json_str_value(content: str, key: str) -> str | None:
-    """Parse an artefact `content` blob and return `key` if it's a string, else None.
-
-    Parsing in Python (rather than a SQL `content::jsonb` cast) keeps a single malformed
-    artefact row from failing the whole cross-team usage report.
-    """
+def _judgment_value(content: str, key: str) -> str | None:
+    # Parse in Python, not via a SQL `content::jsonb` cast, so one malformed artefact row
+    # can't fail the whole cross-team usage report.
     try:
         parsed = json.loads(content)
     except (TypeError, ValueError):
@@ -54,44 +51,30 @@ def _json_str_value(content: str, key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _judgments_as_of(
+def _latest_judgment_as_of(
+    artefact_type: str,
+    key: str,
     cutoff_by_report: dict[uuid.UUID, datetime],
-) -> tuple[dict[uuid.UUID, str], dict[uuid.UUID, str]]:
-    """Priority and actionability per report, frozen at each report's chargeable moment.
+) -> dict[uuid.UUID, str]:
+    """For each report, its newest valid `key` from `artefact_type` artefacts at or before the cutoff.
 
-    For each report returns the value from its newest PRIORITY/ACTIONABILITY judgment artefact
-    whose `created_at` is at or before the report's first-PR timestamp. One query over the
-    `(report, type)` index fetches both judgment types; selection happens in Python so the
-    per-report cutoff and malformed-row tolerance are both handled.
+    Walking newest-first and keeping the first valid value per report freezes the judgment at the
+    report's chargeable moment, and lets a malformed or too-recent artefact fall through to an
+    older valid one. The `-id` tiebreak keeps selection stable when timestamps match.
     """
-    if not cutoff_by_report:
-        return {}, {}
-
-    artefact_type = SignalReportArtefact.ArtefactType
     rows = (
-        SignalReportArtefact.objects.filter(
-            report_id__in=list(cutoff_by_report),
-            type__in=[artefact_type.PRIORITY_JUDGMENT, artefact_type.ACTIONABILITY_JUDGMENT],
-        )
-        # Newest first per (report, type); `-id` breaks created_at ties for stable selection.
-        .order_by("report_id", "type", "-created_at", "-id")
-        .values_list("report_id", "type", "created_at", "content")
+        SignalReportArtefact.objects.filter(report_id__in=list(cutoff_by_report), type=artefact_type)
+        .order_by("report_id", "-created_at", "-id")
+        .values_list("report_id", "created_at", "content")
     )
-
-    priority: dict[uuid.UUID, str] = {}
-    actionability: dict[uuid.UUID, str] = {}
-    resolved: set[tuple[uuid.UUID, str]] = set()
-    for report_id, artefact_type_value, created_at, content in rows:
-        slot = (report_id, artefact_type_value)
-        if slot in resolved or created_at > cutoff_by_report[report_id]:
+    values: dict[uuid.UUID, str] = {}
+    for report_id, created_at, content in rows:
+        if report_id in values or created_at > cutoff_by_report[report_id]:
             continue
-        is_priority = artefact_type_value == artefact_type.PRIORITY_JUDGMENT
-        value = _json_str_value(content, "priority" if is_priority else "actionability")
-        if value is None:
-            continue  # malformed or missing key — fall through to an older valid artefact
-        resolved.add(slot)
-        (priority if is_priority else actionability)[report_id] = value
-    return priority, actionability
+        value = _judgment_value(content, key)
+        if value is not None:
+            values[report_id] = value
+    return values
 
 
 def get_signals_billing_credits_by_team(begin: datetime, end: datetime) -> list[tuple[int, int]]:
@@ -149,7 +132,11 @@ def get_signals_billing_credits_by_team(begin: datetime, end: datetime) -> list[
     if not cutoff_by_report:
         return []
 
-    priority_by_report, actionability_by_report = _judgments_as_of(cutoff_by_report)
+    artefact_type = SignalReportArtefact.ArtefactType
+    priority_by_report = _latest_judgment_as_of(artefact_type.PRIORITY_JUDGMENT, "priority", cutoff_by_report)
+    actionability_by_report = _latest_judgment_as_of(
+        artefact_type.ACTIONABILITY_JUDGMENT, "actionability", cutoff_by_report
+    )
 
     totals: dict[int, int] = defaultdict(int)
     unpriced = 0
@@ -158,7 +145,7 @@ def get_signals_billing_credits_by_team(begin: datetime, end: datetime) -> list[
             continue
         credits = SIGNALS_PRIORITY_CREDITS.get(priority_by_report.get(report_id))
         if not credits:
-            unpriced += 1  # actionable report that shipped a PR but has no usable priority
+            unpriced += 1
             continue
         totals[report_team[report_id]] += credits
 

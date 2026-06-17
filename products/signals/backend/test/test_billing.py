@@ -215,3 +215,9 @@ class TestSignalsBilling(BaseTest):
         self._artefact(report, SignalReportArtefact.ArtefactType.PRIORITY_JUDGMENT, "not valid json", at=_at(5))
         self._pr_run(report, created_at=_at(10))
         self.assertEqual(self._credits(), {self.team.id: 2400})
+
+    def test_malformed_actionability_artefact_falls_back_to_valid(self) -> None:
+        report = self._report(priority="P0")
+        self._artefact(report, SignalReportArtefact.ArtefactType.ACTIONABILITY_JUDGMENT, "{bad", at=_at(5))
+        self._pr_run(report, created_at=_at(10))
+        self.assertEqual(self._credits(), {self.team.id: 2400})
