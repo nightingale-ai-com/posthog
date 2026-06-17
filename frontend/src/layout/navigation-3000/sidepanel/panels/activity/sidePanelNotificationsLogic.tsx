@@ -21,12 +21,14 @@ import { urls } from 'scenes/urls'
 
 import { connectToNotificationsSSE } from '~/layout/navigation-3000/sidepanel/panels/activity/notificationsSSE'
 import { ChangesResponse } from '~/layout/navigation-3000/sidepanel/panels/activity/sidePanelActivityLogic'
-import { InAppNotification, InsightShortId, ResourceEditedEvent, SidePanelTab, WebAnalyticsDigestMetadata } from '~/types'
-
 import {
-    RESOURCE_EDITED_EVENT_TYPE,
-    resourceEditedLogic,
-} from 'products/notifications/frontend/resourceEditedLogic'
+    InAppNotification,
+    InsightShortId,
+    ResourceEditedEvent,
+    SidePanelTab,
+    WebAnalyticsDigestMetadata,
+} from '~/types'
+
 import {
     notificationsList,
     notificationsMarkAllReadCreate,
@@ -39,6 +41,7 @@ import {
     NotificationEventSourceTypeEnumApi,
     NotificationsListParams,
 } from 'products/notifications/frontend/generated/api.schemas'
+import { RESOURCE_EDITED_EVENT_TYPE, resourceEditedLogic } from 'products/notifications/frontend/resourceEditedLogic'
 
 import { sidePanelContextLogic } from '../../sidePanelContextLogic'
 import { sidePanelStateLogic } from '../../sidePanelStateLogic'
