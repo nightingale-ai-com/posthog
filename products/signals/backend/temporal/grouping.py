@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import uuid
 import asyncio
 from collections import defaultdict
@@ -89,7 +88,6 @@ class GenerateEmbeddingOutput:
 @close_db_connections
 async def get_embedding_activity(input: GenerateEmbeddingInput) -> GenerateEmbeddingOutput:
     """Generate embedding for signal content using the embedding worker API."""
-    started_at = time.perf_counter()
     try:
         team = await Team.objects.aget(pk=input.team_id)
         response = await async_generate_embedding(team, input.content, model=EMBEDDING_MODEL.value)
@@ -98,10 +96,8 @@ async def get_embedding_activity(input: GenerateEmbeddingInput) -> GenerateEmbed
             team_id=input.team_id,
             content_length=len(input.content),
         )
-        metrics.record_embedding_call(status="success", started_at=started_at)
         return GenerateEmbeddingOutput(embedding=response.embedding)
     except Exception as e:
-        metrics.record_embedding_call(status="error", started_at=started_at)
         logger.exception(
             f"Failed to generate embedding for team {input.team_id}: {e}",
             team_id=input.team_id,
@@ -844,9 +840,9 @@ async def assign_and_emit_signal_activity(input: AssignAndEmitSignalInput) -> As
                 )
 
         if not matched_deleted:
-            metrics.increment_funnel_stage(metrics.FUNNEL_STAGE_GROUPED, input.source_product)
+            metrics.increment_funnel(metrics.FUNNEL_STAGE_GROUPED, input.source_product)
             if promoted:
-                metrics.increment_funnel_stage(metrics.FUNNEL_STAGE_CANDIDATE_PROMOTED, input.source_product)
+                metrics.increment_funnel(metrics.FUNNEL_STAGE_PROMOTED, input.source_product)
 
         logger.debug(
             f"Assigned and emitted signal to report {report_id}",
