@@ -129,37 +129,121 @@ class SlackThreadHandler:
         except Exception as e:
             logger.warning("slack_update_reaction_failed", error=str(e))
 
-    def update_status(self, text: str) -> None:
-        """Post or chat_update a single live agent-status message in the thread.
+    def start_status_stream(self, first_task_id: str, first_task_title: str) -> str | None:
+        """Open a Slack streaming response in the thread and seed the first plan step.
 
-        Finds the existing status message by ``PROGRESS_MESSAGE_MARKER`` (reuses the
-        same marker as ``post_or_update_progress`` so completion's ``_delete_progress_and_post``
-        cleans both up identically), updates it in place if present, or posts a new
-        one. ``text`` is the caller-supplied status string (e.g. ":pencil2: Editing
-        api.py"). The marker is embedded so the message can still be discovered on
-        subsequent updates.
+        Calls ``chat.startStream`` with ``task_display_mode='plan'`` so the message
+        renders as Slack's native collapsible plan block. The first ``task_update``
+        chunk is in_progress. Returns the message ``ts`` to feed back into
+        ``append_status_step`` / ``stop_status_stream``; returns ``None`` on failure
+        so callers fall back to the legacy placeholder path.
+
+        Channel streams require ``recipient_user_id`` / ``recipient_team_id``; we
+        source the user id from the mention author and the team id from the
+        integration's stored workspace id.
         """
-        # The marker stays in the text so subsequent calls (and the completion
-        # cleanup) can find this message — but it's rendered small so the visible
-        # status reads as the caller's text.
-        rendered = f"{text}\n_{PROGRESS_MESSAGE_MARKER}_"
+        if not self.context.mentioning_slack_user_id:
+            # Channel streams need a recipient — skip if we don't have one.
+            return None
         try:
             client = self._get_client()
-            progress_ts = self._find_progress_message_ts()
-            if progress_ts:
-                client.chat_update(
-                    channel=self.context.channel,
-                    ts=progress_ts,
-                    text=rendered,
-                )
-            else:
-                client.chat_postMessage(
-                    channel=self.context.channel,
-                    thread_ts=self.context.thread_ts,
-                    text=rendered,
-                )
+            integration = self._get_integration()
+            response = client.chat_startStream(
+                channel=self.context.channel,
+                thread_ts=self.context.thread_ts,
+                recipient_user_id=self.context.mentioning_slack_user_id,
+                recipient_team_id=integration.integration_id,
+                task_display_mode="plan",
+                chunks=[
+                    {
+                        "type": "task_update",
+                        "id": first_task_id,
+                        "title": first_task_title[:256],
+                        "status": "in_progress",
+                    }
+                ],
+            )
+            ts = response.get("ts") if isinstance(response, dict) else response["ts"]
+            return ts if isinstance(ts, str) else None
         except Exception as e:
-            logger.warning("slack_update_status_failed", error=str(e))
+            logger.warning("slack_status_stream_start_failed", error=str(e))
+            return None
+
+    def append_status_step(
+        self,
+        ts: str,
+        complete_task_id: str | None,
+        complete_task_title: str | None,
+        new_task_id: str | None,
+        new_task_title: str | None,
+    ) -> None:
+        """Append a step transition to an existing status stream.
+
+        Sends task_update chunks: the previous step (if any) marked ``complete``,
+        and the new step marked ``in_progress``. Either side may be ``None`` — the
+        stop call uses ``complete`` only; a brand-new first step would use
+        ``start_status_stream`` rather than this method.
+        """
+        chunks: list[dict[str, Any]] = []
+        if complete_task_id and complete_task_title:
+            chunks.append(
+                {
+                    "type": "task_update",
+                    "id": complete_task_id,
+                    "title": complete_task_title[:256],
+                    "status": "complete",
+                }
+            )
+        if new_task_id and new_task_title:
+            chunks.append(
+                {
+                    "type": "task_update",
+                    "id": new_task_id,
+                    "title": new_task_title[:256],
+                    "status": "in_progress",
+                }
+            )
+        if not chunks:
+            return
+        try:
+            self._get_client().chat_appendStream(
+                channel=self.context.channel,
+                ts=ts,
+                chunks=chunks,
+            )
+        except Exception as e:
+            logger.warning("slack_status_stream_append_failed", error=str(e))
+
+    def stop_status_stream(
+        self,
+        ts: str,
+        complete_task_id: str | None = None,
+        complete_task_title: str | None = None,
+    ) -> None:
+        """Mark the current step complete (if any) and close the status stream."""
+        if complete_task_id and complete_task_title:
+            try:
+                self._get_client().chat_appendStream(
+                    channel=self.context.channel,
+                    ts=ts,
+                    chunks=[
+                        {
+                            "type": "task_update",
+                            "id": complete_task_id,
+                            "title": complete_task_title[:256],
+                            "status": "complete",
+                        }
+                    ],
+                )
+            except Exception as e:
+                logger.warning("slack_status_stream_final_complete_failed", error=str(e))
+        try:
+            self._get_client().chat_stopStream(
+                channel=self.context.channel,
+                ts=ts,
+            )
+        except Exception as e:
+            logger.warning("slack_status_stream_stop_failed", error=str(e))
 
     def post_or_update_progress(
         self,

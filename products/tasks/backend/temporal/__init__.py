@@ -37,7 +37,11 @@ from .process_task.activities import (
 )
 from .process_task.activities.evaluate_slack_streaming_gate import evaluate_slack_streaming_gate
 from .process_task.activities.get_pr_context import get_pr_context
-from .process_task.activities.update_slack_status import update_slack_status
+from .process_task.activities.update_slack_status import (
+    append_slack_status_step,
+    start_slack_status_stream,
+    stop_slack_status_stream,
+)
 from .process_task.slack_status_relay import SlackStatusRelayWorkflow
 from .process_task.workflow import ProcessTaskWorkflow
 from .slack_relay import PostHogCodeAgentRelayWorkflow, relay_slack_message
@@ -77,7 +81,9 @@ ACTIVITIES = [
     get_pr_context,
     relay_slack_message,
     evaluate_slack_streaming_gate,
-    update_slack_status,
+    start_slack_status_stream,
+    append_slack_status_step,
+    stop_slack_status_stream,
     run_task_automation_activity,
     # create_snapshot activities
     get_snapshot_context,
