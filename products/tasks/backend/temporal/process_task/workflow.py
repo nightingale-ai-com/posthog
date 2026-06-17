@@ -1023,18 +1023,38 @@ class ProcessTaskWorkflow(PostHogWorkflow):
         )
 
     @temporalio.workflow.signal
-    async def agent_status_update(self, text: str) -> None:
+    async def agent_status_update(self, payload: dict[str, Any]) -> None:
+        """Forward a plan-block step update to the current per-turn child.
+
+        ``payload`` carries ``{"title": str, "details": str | None}`` after the
+        enrichment that ``relay_sandbox_events`` emits for every
+        ``_posthog/status`` notification.
+        """
         if not self._streaming_slack_status_enabled or not self._current_slack_relay_workflow_id:
             return
         try:
             handle = workflow.get_external_workflow_handle(self._current_slack_relay_workflow_id)
-            await handle.signal(SlackStatusRelayWorkflow.agent_status_update, text)
+            await handle.signal(SlackStatusRelayWorkflow.agent_status_update, payload)
         except Exception as e:
             # Child might have already timed out / been GC'd. Drop the update
             # rather than escalating — the rate-limit machinery elsewhere
             # ensures the user still sees a reasonable status line.
             workflow.logger.debug(
                 "slack_status_forward_failed",
+                extra={"run_id": self.context.run_id, "error": str(e)},
+            )
+
+    @temporalio.workflow.signal
+    async def agent_text_delta(self, text: str) -> None:
+        """Forward a slice of agent narrative text to the current per-turn child."""
+        if not self._streaming_slack_status_enabled or not self._current_slack_relay_workflow_id:
+            return
+        try:
+            handle = workflow.get_external_workflow_handle(self._current_slack_relay_workflow_id)
+            await handle.signal(SlackStatusRelayWorkflow.agent_text_delta, text)
+        except Exception as e:
+            workflow.logger.debug(
+                "slack_text_forward_failed",
                 extra={"run_id": self.context.run_id, "error": str(e)},
             )
 

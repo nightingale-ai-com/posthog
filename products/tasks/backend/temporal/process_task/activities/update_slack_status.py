@@ -6,6 +6,8 @@ The per-turn :class:`SlackStatusRelayWorkflow` dispatches these as a sequence:
   ``task_update`` chunk and returns the message ``ts`` for the rest of the turn.
 * :func:`append_slack_status_step` — transitions the previous step to
   ``complete`` and the next one to ``in_progress`` in a single ``appendStream``.
+  Optionally appends a ``markdown_text`` chunk in the same call to stream the
+  agent's narrative under the plan block.
 * :func:`stop_slack_status_stream` — marks the trailing step complete and closes
   the stream.
 
@@ -29,6 +31,7 @@ class StartSlackStatusStreamInput:
     slack_thread_context: dict[str, Any]
     first_task_id: str
     first_task_title: str
+    first_task_details: Optional[str] = None
 
 
 @dataclass
@@ -37,8 +40,11 @@ class AppendSlackStatusStepInput:
     ts: str
     complete_task_id: Optional[str]
     complete_task_title: Optional[str]
+    complete_task_details: Optional[str]
     new_task_id: Optional[str]
     new_task_title: Optional[str]
+    new_task_details: Optional[str]
+    markdown_text: Optional[str] = None
 
 
 @dataclass
@@ -47,6 +53,7 @@ class StopSlackStatusStreamInput:
     ts: str
     complete_task_id: Optional[str] = None
     complete_task_title: Optional[str] = None
+    complete_task_details: Optional[str] = None
 
 
 @activity.defn
@@ -55,9 +62,7 @@ def start_slack_status_stream(input: StartSlackStatusStreamInput) -> Optional[st
     """Open a streaming status message and return its ``ts``.
 
     Returns ``None`` when the stream cannot be opened (missing recipient, Slack
-    error). The workflow treats that as "skip streaming for this turn" — the
-    legacy fall-through path then never produces output for the live status,
-    matching the gate-off behavior.
+    error). The workflow treats that as "skip streaming for this turn".
     """
     from products.slack_app.backend.slack_thread import SlackThreadContext, SlackThreadHandler
 
@@ -66,6 +71,7 @@ def start_slack_status_stream(input: StartSlackStatusStreamInput) -> Optional[st
         return SlackThreadHandler(context).start_status_stream(
             first_task_id=input.first_task_id,
             first_task_title=input.first_task_title,
+            first_task_details=input.first_task_details,
         )
     except Exception as e:
         logger.warning("start_slack_status_stream_failed", error=str(e))
@@ -83,8 +89,11 @@ def append_slack_status_step(input: AppendSlackStatusStepInput) -> None:
             ts=input.ts,
             complete_task_id=input.complete_task_id,
             complete_task_title=input.complete_task_title,
+            complete_task_details=input.complete_task_details,
             new_task_id=input.new_task_id,
             new_task_title=input.new_task_title,
+            new_task_details=input.new_task_details,
+            markdown_text=input.markdown_text,
         )
     except Exception as e:
         logger.warning("append_slack_status_step_failed", error=str(e))
@@ -101,6 +110,7 @@ def stop_slack_status_stream(input: StopSlackStatusStreamInput) -> None:
             ts=input.ts,
             complete_task_id=input.complete_task_id,
             complete_task_title=input.complete_task_title,
+            complete_task_details=input.complete_task_details,
         )
     except Exception as e:
         logger.warning("stop_slack_status_stream_failed", error=str(e))

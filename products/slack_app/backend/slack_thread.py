@@ -16,6 +16,31 @@ UPSTREAM_PROVIDER_FAILURE_MESSAGE = (
 UPSTREAM_PROVIDER_ERROR_STATUS_PATTERN = re.compile(r"\bapi error:\s*(?:429|5\d\d)\b", re.IGNORECASE)
 
 
+_TASK_FIELD_LIMIT = 256
+
+
+def _task_update_chunk(
+    task_id: str,
+    title: str,
+    status: str,
+    details: str | None,
+) -> dict[str, Any]:
+    """Build a single task_update chunk for ``chat.startStream`` / ``appendStream``.
+
+    Slack caps the ``title`` and ``details`` fields at 256 characters each; truncate
+    here so callers never have to worry about it.
+    """
+    chunk: dict[str, Any] = {
+        "type": "task_update",
+        "id": task_id,
+        "title": title[:_TASK_FIELD_LIMIT],
+        "status": status,
+    }
+    if details:
+        chunk["details"] = details[:_TASK_FIELD_LIMIT]
+    return chunk
+
+
 def _format_task_error(error: str) -> str:
     error = error.strip()
     if not error:
@@ -129,7 +154,12 @@ class SlackThreadHandler:
         except Exception as e:
             logger.warning("slack_update_reaction_failed", error=str(e))
 
-    def start_status_stream(self, first_task_id: str, first_task_title: str) -> str | None:
+    def start_status_stream(
+        self,
+        first_task_id: str,
+        first_task_title: str,
+        first_task_details: str | None = None,
+    ) -> str | None:
         """Open a Slack streaming response in the thread and seed the first plan step.
 
         Calls ``chat.startStream`` with ``task_display_mode='plan'`` so the message
@@ -137,13 +167,8 @@ class SlackThreadHandler:
         chunk is in_progress. Returns the message ``ts`` to feed back into
         ``append_status_step`` / ``stop_status_stream``; returns ``None`` on failure
         so callers fall back to the legacy placeholder path.
-
-        Channel streams require ``recipient_user_id`` / ``recipient_team_id``; we
-        source the user id from the mention author and the team id from the
-        integration's stored workspace id.
         """
         if not self.context.mentioning_slack_user_id:
-            # Channel streams need a recipient — skip if we don't have one.
             return None
         try:
             client = self._get_client()
@@ -154,14 +179,7 @@ class SlackThreadHandler:
                 recipient_user_id=self.context.mentioning_slack_user_id,
                 recipient_team_id=integration.integration_id,
                 task_display_mode="plan",
-                chunks=[
-                    {
-                        "type": "task_update",
-                        "id": first_task_id,
-                        "title": first_task_title[:256],
-                        "status": "in_progress",
-                    }
-                ],
+                chunks=[_task_update_chunk(first_task_id, first_task_title, "in_progress", first_task_details)],
             )
             ts = response.get("ts") if isinstance(response, dict) else response["ts"]
             return ts if isinstance(ts, str) else None
@@ -174,35 +192,31 @@ class SlackThreadHandler:
         ts: str,
         complete_task_id: str | None,
         complete_task_title: str | None,
+        complete_task_details: str | None,
         new_task_id: str | None,
         new_task_title: str | None,
+        new_task_details: str | None,
+        markdown_text: str | None = None,
     ) -> None:
-        """Append a step transition to an existing status stream.
+        """Append a plan-block step transition (and optional narrative text).
 
-        Sends task_update chunks: the previous step (if any) marked ``complete``,
-        and the new step marked ``in_progress``. Either side may be ``None`` — the
-        stop call uses ``complete`` only; a brand-new first step would use
-        ``start_status_stream`` rather than this method.
+        Sends in one ``chat.appendStream`` call:
+
+        * a ``task_update`` chunk marking the previous step ``complete`` (when
+          ``complete_task_id``/``title`` are given)
+        * a ``task_update`` chunk marking the new step ``in_progress`` (when
+          ``new_task_id``/``title`` are given)
+        * a trailing ``markdown_text`` chunk with the agent's narrative
+          (when ``markdown_text`` is set) — this becomes the streaming body
+          text under the plan block.
         """
         chunks: list[dict[str, Any]] = []
         if complete_task_id and complete_task_title:
-            chunks.append(
-                {
-                    "type": "task_update",
-                    "id": complete_task_id,
-                    "title": complete_task_title[:256],
-                    "status": "complete",
-                }
-            )
+            chunks.append(_task_update_chunk(complete_task_id, complete_task_title, "complete", complete_task_details))
         if new_task_id and new_task_title:
-            chunks.append(
-                {
-                    "type": "task_update",
-                    "id": new_task_id,
-                    "title": new_task_title[:256],
-                    "status": "in_progress",
-                }
-            )
+            chunks.append(_task_update_chunk(new_task_id, new_task_title, "in_progress", new_task_details))
+        if markdown_text:
+            chunks.append({"type": "markdown_text", "text": markdown_text[:12000]})
         if not chunks:
             return
         try:
@@ -219,6 +233,7 @@ class SlackThreadHandler:
         ts: str,
         complete_task_id: str | None = None,
         complete_task_title: str | None = None,
+        complete_task_details: str | None = None,
     ) -> None:
         """Mark the current step complete (if any) and close the status stream."""
         if complete_task_id and complete_task_title:
@@ -227,12 +242,7 @@ class SlackThreadHandler:
                     channel=self.context.channel,
                     ts=ts,
                     chunks=[
-                        {
-                            "type": "task_update",
-                            "id": complete_task_id,
-                            "title": complete_task_title[:256],
-                            "status": "complete",
-                        }
+                        _task_update_chunk(complete_task_id, complete_task_title, "complete", complete_task_details)
                     ],
                 )
             except Exception as e:

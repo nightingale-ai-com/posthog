@@ -354,7 +354,8 @@ async def _relay_loop(
                             # Slack agent-design streaming hooks. The first
                             # session/update of a turn opens a child relay
                             # workflow; each _posthog/status notification feeds
-                            # it a live status text; the matching end_of_turn
+                            # it a plan-block step; agent_message_chunk events
+                            # feed it markdown text; the matching end_of_turn
                             # above closes it.
                             if streaming_slack_status_enabled and workflow_handle is not None:
                                 if not slack_turn_active[0] and _is_session_update(event_data):
@@ -367,10 +368,16 @@ async def _relay_loop(
                                         )
                                     )
                                 if slack_turn_active[0] and _is_status_notification(event_data):
-                                    text = _extract_status_text(event_data)
-                                    if text:
+                                    status_payload = _extract_status_payload(event_data)
+                                    if status_payload is not None:
                                         asyncio.create_task(
-                                            _signal_safely(workflow_handle, "agent_status_update", arg=text)
+                                            _signal_safely(workflow_handle, "agent_status_update", arg=status_payload)
+                                        )
+                                if slack_turn_active[0] and _is_session_update(event_data):
+                                    text_delta = _extract_agent_message_text(event_data)
+                                    if text_delta:
+                                        asyncio.create_task(
+                                            _signal_safely(workflow_handle, "agent_text_delta", arg=text_delta)
                                         )
 
                             now = time.monotonic()
@@ -466,11 +473,50 @@ def _is_status_notification(event_data: dict) -> bool:
     return notification.get("method") == "_posthog/status"
 
 
-def _extract_status_text(event_data: dict) -> str | None:
-    """Pull the human-readable status text out of a ``_posthog/status`` notification."""
+def _extract_status_payload(event_data: dict) -> dict[str, Any] | None:
+    """Pull the plan-block step payload out of a ``_posthog/status`` notification.
+
+    Returns ``{"title": str, "details": str | None}`` shaped for the
+    ``agent_status_update`` signal. The title prefers the enriched ``tool_name``
+    field (e.g. ``"Read"``, ``"Bash"``) — that's what the Slack plan-block step
+    should display — and falls back to the legacy ``text`` field (which carried
+    the rendered ``toolInfo.title`` like ``"Reading api.py"``) for backwards
+    compatibility with un-redeployed agent images. Details is the
+    ``tool_args_preview`` (file path / command / query / etc).
+    """
     notification = event_data.get("notification", {})
     params = notification.get("params") or {}
-    text = params.get("text")
+    title = params.get("tool_name") or params.get("text")
+    if not isinstance(title, str) or not title:
+        return None
+    details = params.get("tool_args_preview")
+    return {
+        "title": title,
+        "details": details if isinstance(details, str) and details else None,
+    }
+
+
+def _extract_agent_message_text(event_data: dict) -> str | None:
+    """Pull the agent narrative-text delta out of a ``session/update`` notification.
+
+    Matches ACP ``agent_message_chunk`` updates. Returns the text payload that
+    should stream into the Slack message body as a ``markdown_text`` chunk; any
+    other update type (tool calls, plan updates, thinking) is ignored here —
+    they're either handled elsewhere or not surfaced in the Slack stream.
+    """
+    notification = event_data.get("notification", {})
+    if notification.get("method") != "session/update":
+        return None
+    params = notification.get("params") or {}
+    update = params.get("update") or {}
+    if update.get("sessionUpdate") != "agent_message_chunk":
+        return None
+    content = update.get("content")
+    if not isinstance(content, dict):
+        return None
+    if content.get("type") != "text":
+        return None
+    text = content.get("text")
     return text if isinstance(text, str) and text else None
 
 
