@@ -473,26 +473,42 @@ def _is_status_notification(event_data: dict) -> bool:
     return notification.get("method") == "_posthog/status"
 
 
+_INTENT_DETAILS_LIMIT = 256
+
+
 def _extract_status_payload(event_data: dict) -> dict[str, Any] | None:
     """Pull the plan-block step payload out of a ``_posthog/status`` notification.
 
-    Returns ``{"title": str, "details": str | None}`` shaped for the
-    ``agent_status_update`` signal. The title prefers the enriched ``tool_name``
-    field (e.g. ``"Read"``, ``"Bash"``) — that's what the Slack plan-block step
-    should display — and falls back to the legacy ``text`` field (which carried
-    the rendered ``toolInfo.title`` like ``"Reading api.py"``) for backwards
-    compatibility with un-redeployed agent images. Details is the
-    ``tool_args_preview`` (file path / command / query / etc).
+    Returns a dict shaped for the ``agent_status_update`` signal:
+
+    * ``title``: the bare tool name (``ToolSearch``, ``Bash``, …). Falls back
+      to the legacy ``text`` field for back-compat with older agent images.
+    * ``details``: the agent's pre-tool prose (``tool_intent``) when it fits
+      Slack's ``task_update.details`` field (≤ :data:`_INTENT_DETAILS_LIMIT`
+      chars); otherwise the arg preview (file path / command / query); else
+      ``None``.
+    * ``clear_buffer``: ``True`` when the intent was used as details — the
+      same prose is already in the child workflow's markdown buffer (via
+      ``agent_message_chunk`` deltas) and would duplicate if it also streamed
+      as body text. ``False`` when intent was too long or absent — the buffer
+      stays so the prose still surfaces, just in the message body.
     """
     notification = event_data.get("notification", {})
     params = notification.get("params") or {}
     title = params.get("tool_name") or params.get("text")
     if not isinstance(title, str) or not title:
         return None
-    details = params.get("tool_args_preview")
+    args_preview = params.get("tool_args_preview")
+    args_preview = args_preview if isinstance(args_preview, str) and args_preview else None
+    intent = params.get("tool_intent")
+    intent = intent.strip() if isinstance(intent, str) else ""
+
+    use_intent_as_details = bool(intent) and len(intent) <= _INTENT_DETAILS_LIMIT
+    details = intent if use_intent_as_details else args_preview
     return {
         "title": title,
-        "details": details if isinstance(details, str) and details else None,
+        "details": details,
+        "clear_buffer": use_intent_as_details,
     }
 
 
