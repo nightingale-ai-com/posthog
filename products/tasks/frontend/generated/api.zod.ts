@@ -1053,8 +1053,17 @@ export const TasksRunsCommandCreateBody = /* @__PURE__ */ zod
  */
 export const tasksRunsRelayMessageCreateBodyTextMax = 10000
 
+export const tasksRunsRelayMessageCreateBodyKindDefault = `reply`
+
 export const TasksRunsRelayMessageCreateBody = /* @__PURE__ */ zod.object({
     text: zod.string().max(tasksRunsRelayMessageCreateBodyTextMax),
+    kind: zod
+        .enum(['reply', 'question'])
+        .describe('\* `reply` - reply\n\* `question` - question')
+        .default(tasksRunsRelayMessageCreateBodyKindDefault)
+        .describe(
+            "Discriminator for the relay's purpose. 'reply' is suppressed when the run is using the Slack agent-design streaming path (the streamed message already carries the agent's reply). 'question' is always relayed — the user needs to see it to respond.\n\n\* `reply` - reply\n\* `question` - question"
+        ),
 })
 
 /**

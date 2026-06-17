@@ -47697,9 +47697,26 @@ export namespace Schemas {
       is_pro?: boolean;
     }
 
+    /**
+     * * `reply` - reply
+     * * `question` - question
+     */
+    export type TaskRunRelayMessageRequestKindEnum = typeof TaskRunRelayMessageRequestKindEnum[keyof typeof TaskRunRelayMessageRequestKindEnum];
+
+
+    export const TaskRunRelayMessageRequestKindEnum = {
+      Reply: 'reply',
+      Question: 'question',
+    } as const;
+
     export interface TaskRunRelayMessageRequest {
       /** @maxLength 10000 */
       text: string;
+      /** Discriminator for the relay's purpose. 'reply' is suppressed when the run is using the Slack agent-design streaming path (the streamed message already carries the agent's reply). 'question' is always relayed — the user needs to see it to respond.
+       *
+       * * `reply` - reply
+       * * `question` - question */
+      kind?: TaskRunRelayMessageRequestKindEnum;
     }
 
     export interface TaskRunRelayMessageResponse {

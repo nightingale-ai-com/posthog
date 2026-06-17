@@ -1470,9 +1470,26 @@ export interface ConnectionTokenResponseApi {
     token: string
 }
 
+/**
+ * * `reply` - reply
+ * * `question` - question
+ */
+export type TaskRunRelayMessageRequestKindEnumApi =
+    (typeof TaskRunRelayMessageRequestKindEnumApi)[keyof typeof TaskRunRelayMessageRequestKindEnumApi]
+
+export const TaskRunRelayMessageRequestKindEnumApi = {
+    Reply: 'reply',
+    Question: 'question',
+} as const
+
 export interface TaskRunRelayMessageRequestApi {
     /** @maxLength 10000 */
     text: string
+    /** Discriminator for the relay's purpose. 'reply' is suppressed when the run is using the Slack agent-design streaming path (the streamed message already carries the agent's reply). 'question' is always relayed — the user needs to see it to respond.
+     *
+     * * `reply` - reply
+     * * `question` - question */
+    kind?: TaskRunRelayMessageRequestKindEnumApi
 }
 
 export interface TaskRunRelayMessageResponseApi {
