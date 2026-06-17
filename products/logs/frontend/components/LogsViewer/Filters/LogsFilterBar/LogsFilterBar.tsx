@@ -1,5 +1,3 @@
-import './LogsFilterBar.scss'
-
 import { BindLogic, useActions, useValues } from 'kea'
 import { useRef, useState } from 'react'
 
@@ -69,7 +67,7 @@ export const LogsFilterBar = ({ showSavedViewsButton = false }: { showSavedViews
                         {showSavedViewsButton && <SavedViewsButton id={id} iconOnly />}
                     </div>
                     <div className="flex shrink-0 gap-1.5">
-                        <div className="LogsDateButtonGroup">
+                        <div className="DateRangePickerButtonGroup">
                             <LemonButton
                                 size="small"
                                 icon={<IconMinusSquare />}
