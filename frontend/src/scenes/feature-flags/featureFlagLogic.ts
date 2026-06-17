@@ -1288,10 +1288,12 @@ export const featureFlagLogic = kea<featureFlagLogicType>([
                     }
 
                     if (flagType !== 'remote_config') {
-                        // Await the fetch so defaults apply even on a fresh page load.
-                        const conditionsConfig = await defaultReleaseConditionsLogic.asyncActions
+                        // Await the fetch for its side effect, then read from values — the loader action
+                        // resolves to undefined, so the result lives on values.defaultReleaseConditions.
+                        await defaultReleaseConditionsLogic.asyncActions
                             .loadDefaultReleaseConditions()
-                            .catch(() => values.defaultReleaseConditions)
+                            .catch(() => null)
+                        const conditionsConfig = values.defaultReleaseConditions
                         if (conditionsConfig?.enabled && conditionsConfig.default_groups?.length > 0) {
                             baseFlagConfig = {
                                 ...baseFlagConfig,
