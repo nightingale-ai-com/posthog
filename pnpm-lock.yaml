@@ -694,6 +694,9 @@ importers:
       '@posthog/products-notebooks':
         specifier: workspace:*
         version: link:../products/notebooks
+      '@posthog/products-notifications':
+        specifier: workspace:*
+        version: link:../products/notifications
       '@posthog/products-persons':
         specifier: workspace:*
         version: link:../products/persons
