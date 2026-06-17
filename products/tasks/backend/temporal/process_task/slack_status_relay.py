@@ -98,11 +98,9 @@ class SlackStatusRelayWorkflow(PostHogWorkflow):
         agent emits one per ``!alreadyCached`` tool_use), so every signal
         becomes a separate step — we never deduplicate by title/details.
 
-        ``payload``: ``{"title": str, "details": str | None, "clear_buffer":
-        bool}``. ``clear_buffer`` is ``True`` when the orchestrator promoted
-        the agent's pre-tool prose into the step's details; we drop the
-        markdown buffer to avoid duplicating that prose in the body. Accepts
-        the old ``str`` shape for compatibility with in-flight relays.
+        ``payload``: ``{"title": str, "details": str | None}``. Accepts the
+        old ``str`` shape too for compatibility with in-flight relays that
+        emit the pre-enrichment payload.
         """
         if isinstance(payload, str):
             self._pending_steps.append(PendingStep(title=payload, details=None))
@@ -117,8 +115,6 @@ class SlackStatusRelayWorkflow(PostHogWorkflow):
                 details=details if isinstance(details, str) and details else None,
             )
         )
-        if payload.get("clear_buffer"):
-            self._pending_markdown_buffer = ""
 
     @workflow.signal
     async def agent_text_delta(self, text: str) -> None:
