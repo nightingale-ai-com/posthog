@@ -252,6 +252,7 @@ rules:
                               |UserInterview
                               |UserInterviewTopic
                               |UserRepoPreference
+                              |WarehouseColumnAnnotation
                               |WebAnalyticsFilterPreset
                               |WizardSession
                           )$
@@ -503,6 +504,7 @@ rules:
                         |UserInterview
                         |UserInterviewTopic
                         |UserRepoPreference
+                        |WarehouseColumnAnnotation
                         |WebAnalyticsFilterPreset
                         |WizardSession
                     )$
