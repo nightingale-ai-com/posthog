@@ -560,6 +560,7 @@ doesn't conflict with concurrent PRs.
 - qualtrics
 - quickbooks
 - railz
+- razorpay
 - rd_station_marketing
 - recreation
 - recruitee
