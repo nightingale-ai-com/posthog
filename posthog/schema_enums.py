@@ -2135,6 +2135,7 @@ class IntegrationKind(StrEnum):
     LINKEDIN_ADS = "linkedin-ads"
     SNAPCHAT = "snapchat"
     STRIPE = "stripe"
+    INSTAGRAM = "instagram"
     INTERCOM = "intercom"
     EMAIL = "email"
     TWILIO = "twilio"
