@@ -30,9 +30,25 @@ jobs:
         runs-on: ubuntu-latest
         timeout-minutes: 5
         name: Determine need to run frontend checks
+        # Skip when a bot commits only snapshot baselines on a PR — Visual Review
+        # auto-commits frontend/snapshots.yml (or playwright/snapshots.yml) after
+        # human review and CI approval, so re-running the full suite is pure waste.
+        # The aggregator (frontend_tests) treats the resulting skips as success.
         outputs:
-            frontend: ${{ steps.filter.outputs.frontend || 'true' }}
-            frontend_code: ${{ steps.filter.outputs.frontend_code || 'true' }}
+            frontend: >-
+                ${{ (steps.filter.outputs.frontend || 'true') == 'true'
+                    && !(github.event_name == 'pull_request'
+                         && (contains(github.actor, '[bot]') || github.actor == 'posthog-bot')
+                         && fromJSON(steps.filter.outputs.snapshots_count || '0') > 0
+                         && fromJSON(steps.filter.outputs.snapshots_count || '0')
+                            == fromJSON(steps.filter.outputs.frontend_count || '0')) }}
+            frontend_code: >-
+                ${{ (steps.filter.outputs.frontend_code || 'true') == 'true'
+                    && !(github.event_name == 'pull_request'
+                         && (contains(github.actor, '[bot]') || github.actor == 'posthog-bot')
+                         && fromJSON(steps.filter.outputs.snapshots_count || '0') > 0
+                         && fromJSON(steps.filter.outputs.snapshots_count || '0')
+                            == fromJSON(steps.filter.outputs.frontend_code_count || '0')) }}
         steps:
             # For pull requests it's not necessary to check out the code, but we
             # also want this to run on master, so we need to check out
@@ -107,6 +123,11 @@ jobs:
                         - tsconfig.*.json
                         - webpack.config.js
                         - stylelint*
+                      # Snapshot baselines auto-committed by Visual Review. Counted so
+                      # the `changes` outputs above can skip a bot's snapshots-only push.
+                      snapshots:
+                        - 'frontend/snapshots.yml'
+                        - 'playwright/snapshots.yml'
 
     # Pick which jest tests to run on draft PRs by passing changed files to
     # `jest --findRelatedTests` (jest's resolver walks the import graph for us).
