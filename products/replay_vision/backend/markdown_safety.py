@@ -58,7 +58,7 @@ def strip_external_links_markdown(markdown: str) -> str:
     )
     # Backtick-wrap any non-PostHog destination still glued to a `](` (a malformed link the rule
     # above couldn't match) so the bare-URL rule's backtick lookbehind keeps it inert.
-    md = _ORPHAN_DEST_RE.sub(lambda m: m.group(0) if _is_allowed_link_url(m.group(1)) else f"](`{m.group(1)}`", md)
+    md = _ORPHAN_DEST_RE.sub(lambda m: m.group(0) if _is_allowed_link_url(m.group(1)) else f"](`{m.group(1)}`)", md)
     md = _AUTOLINK_RE.sub(lambda m: _neutralize_url(m.group(1), keep_as=m.group(0)), md)
     md = _BARE_URL_RE.sub(lambda m: _neutralize_url(m.group(1)), md)
     return md
