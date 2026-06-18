@@ -26,7 +26,8 @@ class ErrorTrackingQueryRunner(AnalyticsQueryRunner[ErrorTrackingQueryResponse])
     date_from: datetime.datetime
     date_to: datetime.datetime
 
-    CACHE_VERSION = 2
+    # 3: default date_from changed from all-time to a 7-day window — invalidate stale cached results.
+    CACHE_VERSION = 3
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
