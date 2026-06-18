@@ -3170,6 +3170,8 @@ export interface LogAttributesQueryResponse extends AnalyticsQueryResponseBase {
 export interface LogValueResult {
     id: string
     name: string
+    /** Number of log records with this attribute value, over the current date range, service, and resource filters. */
+    count?: integer
 }
 
 export interface LogValuesQueryResponse extends AnalyticsQueryResponseBase {

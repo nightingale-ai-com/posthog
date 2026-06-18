@@ -24720,6 +24720,8 @@ export namespace Schemas {
     }
 
     export interface LogValueResult {
+      /** Number of log records with this attribute value, over the current date range, service, and resource filters. */
+      count?: number | null;
       id: string;
       name: string;
     }
@@ -49097,6 +49099,8 @@ export namespace Schemas {
       id: string;
       /** Display name — currently identical to `id`. */
       name: string;
+      /** Number of log records with this attribute value, scoped to the current date range, service, and resource filters. */
+      count?: number;
     }
 
     /**
