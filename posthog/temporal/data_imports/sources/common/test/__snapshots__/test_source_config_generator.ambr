@@ -390,6 +390,7 @@
           ExternalDataSourceType.NASA: NasaSourceConfig,
           ExternalDataSourceType.NAVAN: NavanSourceConfig,
           ExternalDataSourceType.NEBIUSAI: NebiusAISourceConfig,
+          ExternalDataSourceType.NEON: NeonSourceConfig,
           ExternalDataSourceType.NETSUITE: NetSuiteSourceConfig,
           ExternalDataSourceType.NEWYORKTIMES: NewYorkTimesSourceConfig,
           ExternalDataSourceType.NEWSAPI: NewsApiSourceConfig,

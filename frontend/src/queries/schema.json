@@ -21247,6 +21247,7 @@
                 "Streamlabs",
                 "Datorama",
                 "Ahrefs",
+                "Neon",
                 "Custom"
             ],
             "type": "string"
