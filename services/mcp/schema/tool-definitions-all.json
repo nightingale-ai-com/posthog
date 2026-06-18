@@ -8088,6 +8088,48 @@
         },
         "feature_flag": "visual-review"
     },
+    "warehouse-column-annotations-create": {
+        "description": "Add a semantic description for a data warehouse table or column. Provide the table id, the column_name (empty string for a table-level description), and the description. The new annotation is recorded as user-edited, which prevents automatic enrichment from overwriting it.",
+        "category": "Data warehouse",
+        "feature": "data_warehouse",
+        "summary": "Add a warehouse column description",
+        "title": "Add a warehouse column description",
+        "required_scopes": ["external_data_source:write"],
+        "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false
+        }
+    },
+    "warehouse-column-annotations-list": {
+        "description": "List semantic descriptions of data warehouse tables and columns. Pass ?table_id=<uuid> to scope to one table. Each entry has the column_name (empty string = table-level description), the description, and its source (native_comment from the source database, ai_generated, or user_edited). Use this to see what the imported data means before writing SQL against it.",
+        "category": "Data warehouse",
+        "feature": "data_warehouse",
+        "summary": "List warehouse column descriptions",
+        "title": "List warehouse column descriptions",
+        "required_scopes": ["external_data_source:read"],
+        "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true
+        }
+    },
+    "warehouse-column-annotations-partial-update": {
+        "description": "Update the description of an existing warehouse table or column annotation by its id. The annotation is marked user-edited, so automatic enrichment will no longer overwrite it.",
+        "category": "Data warehouse",
+        "feature": "data_warehouse",
+        "summary": "Edit a warehouse column description",
+        "title": "Edit a warehouse column description",
+        "required_scopes": ["external_data_source:write"],
+        "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": false
+        }
+    },
     "web-analytics-weekly-digest": {
         "description": "Summarizes a project's web analytics over a lookback window (default 7 days): unique visitors, pageviews, sessions, bounce rate, and average session duration with period-over-period comparisons, plus the top 5 pages, top 5 traffic sources, and goal conversions. Accepts optional `days` (1–90, default 7) and `compare` (bool, default true) query params — pass `days=30` to summarize the last month, or `compare=false` to skip the period-over-period comparison for a faster response. Use this to answer questions like \"how are my web analytics?\", \"how did the site do last week?\", or \"what's my traffic looking like this month?\".",
         "category": "Web analytics",
