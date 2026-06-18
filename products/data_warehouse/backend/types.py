@@ -665,6 +665,7 @@ class ExternalDataSourceType(models.TextChoices):
     STREAMLABS = "Streamlabs", "Streamlabs"
     DATORAMA = "Datorama", "Datorama"
     AHREFS = "Ahrefs", "Ahrefs"
+    APPSTACK = "Appstack", "Appstack"
     CUSTOM = "Custom", "Custom"
 
 
