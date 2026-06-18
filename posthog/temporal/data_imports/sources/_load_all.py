@@ -355,6 +355,7 @@ from .nasa.source import NasaSource
 from .navan.source import NavanSource
 from .nebius_ai.source import NebiusAISource
 from .netsuite.source import NetSuiteSource
+from .new_relic.source import NewRelicSource
 from .new_york_times.source import NewYorkTimesSource
 from .news_api.source import NewsApiSource
 from .newsdata.source import NewsDataSource

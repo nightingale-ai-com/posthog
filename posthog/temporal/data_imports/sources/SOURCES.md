@@ -487,6 +487,7 @@ doesn't conflict with concurrent PRs.
 - navan
 - nebius_ai
 - netsuite
+- new_relic
 - new_york_times
 - news_api
 - newsdata
