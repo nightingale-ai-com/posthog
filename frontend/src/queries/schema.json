@@ -21247,6 +21247,7 @@
                 "Streamlabs",
                 "Datorama",
                 "Ahrefs",
+                "NewRelic",
                 "Custom"
             ],
             "type": "string"

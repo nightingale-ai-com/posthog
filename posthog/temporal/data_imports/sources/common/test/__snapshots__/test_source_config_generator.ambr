@@ -391,6 +391,7 @@
           ExternalDataSourceType.NAVAN: NavanSourceConfig,
           ExternalDataSourceType.NEBIUSAI: NebiusAISourceConfig,
           ExternalDataSourceType.NETSUITE: NetSuiteSourceConfig,
+          ExternalDataSourceType.NEWRELIC: NewRelicSourceConfig,
           ExternalDataSourceType.NEWYORKTIMES: NewYorkTimesSourceConfig,
           ExternalDataSourceType.NEWSAPI: NewsApiSourceConfig,
           ExternalDataSourceType.NEWSDATA: NewsDataSourceConfig,
