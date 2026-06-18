@@ -194,6 +194,11 @@ class SnowflakeSource(SQLSource[SnowflakeSourceConfig]):
             # connector's login is rejected (250001 / 08001). An unattended sync can't answer a
             # Duo push, so retrying never succeeds — surface an actionable message instead.
             "Duo Security authentication is denied": "Snowflake rejected the login because multi-factor authentication (Duo Security) is enforced for this user. Automated syncs can't answer an MFA prompt — connect with a service user that uses key-pair authentication or is exempt from MFA.",
+            # Snowflake error 250001 (08001): key-pair login was rejected because the JWT the connector
+            # signed with the configured private key doesn't match the public key registered on the
+            # Snowflake user — typically after a key rotation, or if the public key was never set.
+            # Retrying never succeeds until the customer re-registers a matching public key.
+            "JWT token is invalid": "Snowflake rejected the key-pair login because the public key registered on your Snowflake user does not match the private key configured here (often after a key rotation, or if the public key was never set). Re-register the matching public key on your Snowflake user (ALTER USER ... SET RSA_PUBLIC_KEY), then resync.",
             "invalid credentials": "Snowflake authentication failed. Please check your username, password, and account details.",
             "authentication failed": "Snowflake authentication failed. Please check your username, password, and account details.",
             # Snowflake error 000904 (42000): the table or view we select from references a column
