@@ -39,6 +39,7 @@ from products.web_analytics.backend.hogql_queries.web_analytics_lazy_precompute 
     test_account_filter_expr,
     user_filter_expr,
 )
+from products.web_analytics.backend.hogql_queries.web_lazy_precompute_common import get_team_max_window_days
 
 _FAMILY = "web_stats"
 
@@ -284,6 +285,7 @@ def ensure_web_stats_precomputed(
         placeholders=placeholders,
         query_type=f"web_stats_{runner.query.breakdownBy.value}_lazy_insert",
         spill_to_disk=True,  # high-cardinality breakdown GROUP BY; can build a large hash table
+        max_window_days=get_team_max_window_days(runner.team.id),
     )
 
 

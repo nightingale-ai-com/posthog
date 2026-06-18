@@ -15,11 +15,14 @@ from posthog.schema import (
     WebStatsTableQuery,
 )
 
+from posthog import redis
 from posthog.clickhouse.query_tagging import get_query_tag_value
 from posthog.hogql_queries.query_runner import AnalyticsQueryRunner
 
 from products.web_analytics.backend.hogql_queries.web_lazy_precompute_common import (
+    TEAM_WINDOW_DAYS_REDIS_KEY,
     compute_filters_eligibility_hash,
+    get_team_max_window_days,
     is_precompute_enabled_for_team,
 )
 from products.web_analytics.backend.hogql_queries.web_overview import WebOverviewQueryRunner
@@ -239,3 +242,29 @@ class TestFiltersEligibilityHashContextvarBinding(ClickhouseTestMixin, APIBaseTe
             runner.calculate()
 
         assert captured["query_tag"] is None
+
+
+class TestGetTeamMaxWindowDays(BaseTest):
+    def tearDown(self):
+        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+        super().tearDown()
+
+    def test_reads_materialized_window(self):
+        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "2")
+        assert get_team_max_window_days(self.team.pk) == 2
+
+    def test_team_not_in_hash_is_none(self):
+        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "2")
+        assert get_team_max_window_days(self.team.pk + 999_999) is None
+
+    def test_unset_key_is_none(self):
+        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+        assert get_team_max_window_days(self.team.pk) is None
+
+    def test_non_integer_value_is_none(self):
+        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "not-a-number")
+        assert get_team_max_window_days(self.team.pk) is None
+
+    @mock.patch(f"{_COMMON}.redis.get_client", side_effect=Exception("redis down"))
+    def test_redis_failure_falls_back_to_none(self, _client):
+        assert get_team_max_window_days(self.team.pk) is None

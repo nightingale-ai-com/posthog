@@ -25,9 +25,45 @@ from posthog.hogql import ast
 from posthog.hogql.property import property_to_expr
 from posthog.hogql.transforms.preaggregated_table_transformation import is_integer_timezone
 
+from posthog import redis
 from posthog.models import Team
 
 logger = structlog.get_logger(__name__)
+
+# Redis hash {team_id: window_days} of per-team max insert-windows, materialized
+# daily by the `web_precompute_window_sizing` Dagster job. A very high-cardinality
+# team's wide-window GROUP BY (session, breakdown) OOMs the precompute INSERT;
+# passing this cap to `ensure_precomputed(max_window_days=...)` bounds the job width
+# so the hash table stays under the memory limit. Teams without an entry are
+# uncapped and use the default TTL-merged window.
+#
+# It's a memory guardrail, not a per-family exact bound: the sizing job measures
+# (session, $pathname) cardinality, but the runners that read this cap GROUP BY
+# different keys (browser/os/country for stats, action_id for goals). The proxy is
+# conservative for those, and `spill_to_disk` backstops any under-sizing. The cap is
+# wired into the high-cardinality runners that set `spill_to_disk` (stats, paths,
+# vitals paths, goals); overview is uncapped (low-cardinality, no spill) and
+# frustration is bounded by its narrowed event scan instead.
+TEAM_WINDOW_DAYS_REDIS_KEY = "preagg:team_window_days"
+
+
+def get_team_max_window_days(team_id: int) -> int | None:
+    """The materialized per-team max insert-window (days), or None if unset.
+
+    Best-effort: a Redis failure falls through to the default window — it never
+    blocks the insert. Clamps to >= 1 so a stray non-positive value can't collapse
+    every range into a zero-width (impossible) job."""
+    try:
+        raw = redis.get_client().hget(TEAM_WINDOW_DAYS_REDIS_KEY, str(team_id))
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return None
+
 
 # Fields stripped from the query payload before hashing.
 # These don't influence which precompute job_id a query would map to —

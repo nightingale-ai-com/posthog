@@ -30,7 +30,6 @@ from posthog.hogql.parser import parse_select
 from posthog.hogql.placeholders import replace_placeholders
 from posthog.hogql.printer import prepare_and_print_ast
 
-from posthog import redis
 from posthog.clickhouse.client import sync_execute
 from posthog.clickhouse.preaggregation.sql import DISTRIBUTED_PREAGGREGATION_RESULTS_TABLE
 from posthog.clickhouse.query_tagging import tags_context
@@ -257,8 +256,9 @@ def split_ranges_by_ttl(
     from covering days with different TTL requirements.
 
     `max_window_days` additionally caps the merged job width: a merge also breaks
-    when adding the next day would exceed it. This is how a very high-cardinality
-    team's window is bounded so its GROUP BY stays under the memory limit.
+    when adding the next day would exceed it. Callers use this to bound a job's
+    GROUP BY so its hash table stays under the memory limit; `None` leaves the
+    window uncapped.
     """
     result: list[tuple[datetime, datetime, int]] = []
 
@@ -283,31 +283,6 @@ def split_ranges_by_ttl(
         result.append((current_start, current_end, current_ttl))
 
     return result
-
-
-# Redis hash {team_id: window_days} of per-team max insert-windows, materialized
-# daily by the `web_precompute_window_sizing` Dagster job (which writes this key
-# directly). The executor reads it to cap a very high-cardinality team's window so
-# its GROUP BY stays under the memory limit; teams without an entry use the default
-# TTL-merged window.
-TEAM_WINDOW_DAYS_REDIS_KEY = "preagg:team_window_days"
-
-
-def get_team_max_window_days(team_id: int) -> int | None:
-    """The materialized per-team max insert-window (days), or None if unset.
-
-    Best-effort: a Redis failure falls through to the default window — it never
-    blocks the insert."""
-    try:
-        raw = redis.get_client().hget(TEAM_WINDOW_DAYS_REDIS_KEY, str(team_id))
-    except Exception:
-        return None
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 # ClickHouse error codes that should NOT be retried.
@@ -767,6 +742,7 @@ class LazyComputationExecutor:
         start: datetime,
         end: datetime,
         run_insert: Callable[[Team, PreaggregationJob], None] | None = None,
+        max_window_days: int | None = None,
     ) -> LazyComputationResult:
         """
         Execute computation jobs for the given query and time range.
@@ -781,12 +757,12 @@ class LazyComputationExecutor:
         Args:
             run_insert: Optional custom insert function. If not provided, uses the
                         default AST-based run_computation_insert with query_info.
+            max_window_days: Optional cap on each job's window width (days). The
+                        caller supplies it (e.g. a per-team value sized to keep the
+                        GROUP BY under the memory limit); None leaves it uncapped.
         """
         insert_fn = run_insert or (lambda t, j: run_lazy_computation_insert(t, j, query_info))
         query_hash = compute_query_hash(query_info)
-        # Cap the job window for very high-cardinality teams (materialized in Redis by
-        # the window-sizing Dagster job). None → no cap → default TTL-merged window.
-        max_window_days = get_team_max_window_days(team.id)
 
         errors: list[str] = []
         failures = 0
@@ -849,6 +825,17 @@ class LazyComputationExecutor:
                 did_work = False
                 if ttl_ranges and failures <= self.max_retries:
                     for range_start, range_end, ttl in ttl_ranges:
+                        # Each insert runs inline and is bounded only by the ClickHouse
+                        # max_execution_time, which is larger than our wait budget. A capped
+                        # (narrow) window can produce many ranges; stop before starting another
+                        # insert once the budget is spent rather than running the whole set
+                        # back-to-back and blowing well past wait_timeout_seconds.
+                        if time.monotonic() - start_time >= self.wait_timeout_seconds:
+                            errors.append("Timeout waiting for computation jobs")
+                            result = LazyComputationResult(ready=False, job_ids=[], errors=errors)
+                            _log_execution("timeout", result)
+                            return result
+
                         try:
                             with transaction.atomic():
                                 new_job = create_lazy_computation_job(team, query_hash, range_start, range_end, ttl)
@@ -1060,6 +1047,7 @@ def ensure_precomputed(
     sentinel_placeholders: set[str] | None = None,
     query_type: str | None = None,
     spill_to_disk: bool = False,
+    max_window_days: int | None = None,
 ) -> LazyComputationResult:
     """
     Ensure lazy-computed data exists for the given query and time range.
@@ -1179,7 +1167,14 @@ def ensure_precomputed(
 
     ttl_schedule = parse_ttl_schedule(ttl_seconds, team.timezone)
     executor = LazyComputationExecutor(ttl_schedule=ttl_schedule)
-    return executor.execute(team, query_info, time_range_start, time_range_end, run_insert=_run_manual_insert)
+    return executor.execute(
+        team,
+        query_info,
+        time_range_start,
+        time_range_end,
+        run_insert=_run_manual_insert,
+        max_window_days=max_window_days,
+    )
 
 
 def _resolve_insert_query(insert_query: str | ast.SelectQuery, placeholders: dict[str, ast.Expr]) -> ast.SelectQuery:

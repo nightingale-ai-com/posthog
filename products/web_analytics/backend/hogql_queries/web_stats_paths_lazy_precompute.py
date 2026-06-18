@@ -37,6 +37,7 @@ from products.web_analytics.backend.hogql_queries.web_lazy_precompute_common imp
     ceil_utc_day,
     check_common_eligibility,
     floor_utc_day,
+    get_team_max_window_days,
     host_filter_expr,
     log_eligibility_outcome,
     test_account_filter_expr,
@@ -300,6 +301,7 @@ def ensure_web_stats_paths_precomputed(
         placeholders=placeholders,
         query_type="web_stats_paths_lazy_insert",
         spill_to_disk=True,  # high-cardinality path breakdown GROUP BY; can build a large hash table
+        max_window_days=get_team_max_window_days(runner.team.id),
     )
 
 

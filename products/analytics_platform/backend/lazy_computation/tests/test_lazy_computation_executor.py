@@ -17,7 +17,6 @@ from posthog.hogql import ast
 from posthog.hogql.parser import parse_select
 from posthog.hogql.query import execute_hogql_query
 
-from posthog import redis
 from posthog.clickhouse.client import sync_execute
 from posthog.clickhouse.preaggregation.sql import DISTRIBUTED_PREAGGREGATION_RESULTS_TABLE
 from posthog.hogql_queries.insights.trends.trends_query_runner import TrendsQueryRunner
@@ -34,7 +33,6 @@ from products.analytics_platform.backend.lazy_computation.lazy_computation_execu
     DEFAULT_WAIT_TIMEOUT_SECONDS,
     NON_RETRYABLE_CLICKHOUSE_ERROR_CODES,
     PREAGGREGATION_INSERT_QUORUM,
-    TEAM_WINDOW_DAYS_REDIS_KEY,
     LazyComputationExecutor,
     LazyComputationResult,
     LazyComputationTable,
@@ -48,7 +46,6 @@ from products.analytics_platform.backend.lazy_computation.lazy_computation_execu
     ensure_precomputed,
     filter_overlapping_jobs,
     find_missing_contiguous_windows,
-    get_team_max_window_days,
     is_non_retryable_error,
     parse_ttl_schedule,
     run_lazy_computation_insert,
@@ -2772,11 +2769,7 @@ class TestInsertSettingsAppliedToInserts(BaseTest):
         assert mock_execute.call_args.kwargs["settings"] == _get_insert_settings(self.team.pk)
 
 
-class TestPerTeamWindowCap(ClickhouseTestMixin, BaseTest):
-    def tearDown(self):
-        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
-        super().tearDown()
-
+class TestExecuteMaxWindowDays(ClickhouseTestMixin, BaseTest):
     def _query_info(self) -> QueryInfo:
         s = parse_select(
             """
@@ -2793,40 +2786,54 @@ class TestPerTeamWindowCap(ClickhouseTestMixin, BaseTest):
         assert all(j.status == PreaggregationJob.Status.READY for j in jobs)
         return sorted((j.time_range_start, j.time_range_end) for j in jobs)
 
-    def test_get_team_max_window_days_reads_redis(self):
-        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "2")
-        assert get_team_max_window_days(self.team.pk) == 2
-        assert get_team_max_window_days(self.team.pk + 999_999) is None  # not in the hash
-
-    def test_get_team_max_window_days_none_when_unset(self):
-        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
-        assert get_team_max_window_days(self.team.pk) is None
-
-    def test_execute_caps_window_for_listed_team(self):
-        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "1")
+    def test_execute_caps_window_when_set(self):
         result = LazyComputationExecutor().execute(
             team=self.team,
             query_info=self._query_info(),
             start=datetime(2024, 1, 1, tzinfo=UTC),
             end=datetime(2024, 1, 8, tzinfo=UTC),  # 7 days
             run_insert=lambda t, j: None,  # no-op insert
+            max_window_days=1,
         )
         assert result.ready is True
         windows = self._ready_windows(result.job_ids)
         assert len(windows) == 7
         assert all((end - start) == timedelta(days=1) for start, end in windows)
 
-    def test_execute_no_cap_when_team_unlisted(self):
-        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+    def test_execute_no_cap_when_none(self):
         result = LazyComputationExecutor().execute(
             team=self.team,
             query_info=self._query_info(),
             start=datetime(2024, 1, 1, tzinfo=UTC),
             end=datetime(2024, 1, 8, tzinfo=UTC),
             run_insert=lambda t, j: None,
+            max_window_days=None,
         )
         assert result.ready is True
         # uniform default schedule + no cap → one merged 7-day job
         assert self._ready_windows(result.job_ids) == [
             (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 8, tzinfo=UTC))
         ]
+
+    def test_execute_bails_mid_loop_when_budget_exhausted(self):
+        # max_window_days=1 splits the 7-day range into 7 one-day inserts, all run inline.
+        # A spent wait budget must stop the loop before the next insert rather than running
+        # the whole set back-to-back.
+        calls: list = []
+
+        def slow_insert(_t, job) -> None:
+            calls.append(job.id)
+            time_mod.sleep(0.02)
+
+        result = LazyComputationExecutor(wait_timeout_seconds=0.01).execute(
+            team=self.team,
+            query_info=self._query_info(),
+            start=datetime(2024, 1, 1, tzinfo=UTC),
+            end=datetime(2024, 1, 8, tzinfo=UTC),
+            run_insert=slow_insert,
+            max_window_days=1,
+        )
+        assert result.ready is False
+        assert any("Timeout" in e for e in result.errors)
+        # bailed after the first insert exhausted the budget — did not run all 7
+        assert 1 <= len(calls) < 7
