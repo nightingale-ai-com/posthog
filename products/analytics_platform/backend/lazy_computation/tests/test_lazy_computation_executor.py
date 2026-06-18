@@ -2815,6 +2815,34 @@ class TestExecuteMaxWindowDays(ClickhouseTestMixin, BaseTest):
             (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 8, tzinfo=UTC))
         ]
 
+    def test_execute_surfaces_memory_exceeded_on_oom(self):
+        def oom_insert(_t, _j) -> None:
+            raise ServerException(message="Memory limit (total) exceeded", code=241)
+
+        result = LazyComputationExecutor(max_retries=0).execute(
+            team=self.team,
+            query_info=self._query_info(),
+            start=datetime(2024, 1, 1, tzinfo=UTC),
+            end=datetime(2024, 1, 2, tzinfo=UTC),
+            run_insert=oom_insert,
+        )
+        assert result.ready is False
+        assert result.memory_exceeded is True
+
+    def test_execute_memory_exceeded_false_for_non_oom_failure(self):
+        def syntax_insert(_t, _j) -> None:
+            raise ServerException(message="Syntax error", code=62)
+
+        result = LazyComputationExecutor(max_retries=0).execute(
+            team=self.team,
+            query_info=self._query_info(),
+            start=datetime(2024, 1, 1, tzinfo=UTC),
+            end=datetime(2024, 1, 2, tzinfo=UTC),
+            run_insert=syntax_insert,
+        )
+        assert result.ready is False
+        assert result.memory_exceeded is False
+
     def test_execute_bails_mid_loop_when_budget_exhausted(self):
         # max_window_days=1 splits the 7-day range into 7 one-day inserts, all run inline.
         # A spent wait budget must stop the loop before the next insert rather than running

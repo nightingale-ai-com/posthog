@@ -28,33 +28,37 @@ from posthog.hogql.transforms.preaggregated_table_transformation import is_integ
 from posthog import redis
 from posthog.models import Team
 
+from products.analytics_platform.backend.lazy_computation.lazy_computation_executor import (
+    LazyComputationResult,
+    ensure_precomputed,
+)
+
 logger = structlog.get_logger(__name__)
 
-# Redis hash {team_id: window_days} of per-team max insert-windows, materialized
-# daily by the `web_precompute_window_sizing` Dagster job. A very high-cardinality
-# team's wide-window GROUP BY (session, breakdown) OOMs the precompute INSERT;
-# passing this cap to `ensure_precomputed(max_window_days=...)` bounds the job width
-# so the hash table stays under the memory limit. Teams without an entry are
-# uncapped and use the default TTL-merged window.
-#
-# It's a memory guardrail, not a per-family exact bound: the sizing job measures
-# (session, $pathname) cardinality, but the runners that read this cap GROUP BY
-# different keys (browser/os/country for stats, action_id for goals). The proxy is
-# conservative for those, and `spill_to_disk` backstops any under-sizing. The cap is
-# wired into the high-cardinality runners that set `spill_to_disk` (stats, paths,
-# vitals paths, goals); overview is uncapped (low-cardinality, no spill) and
-# frustration is bounded by its narrowed event scan instead.
-TEAM_WINDOW_DAYS_REDIS_KEY = "preagg:team_window_days"
+# Per-team OOM pin. A very high-cardinality team's wide-window GROUP BY (session, breakdown)
+# can OOM the precompute INSERT. We run uncapped until that happens; on an OOM we set this
+# key so the team's subsequent inserts are capped to a 1-day window (passed to
+# `ensure_precomputed(max_window_days=...)`), which keeps the hash table under the memory
+# limit. One string key per team rather than a shared hash so each pin carries its own TTL.
+# The TTL self-heals: it expires after a couple of weeks, the team retries the wide window,
+# and re-pins only if it OOMs again (e.g. a team whose volume has since dropped is freed).
+TEAM_WINDOW_DAYS_REDIS_PREFIX = "preagg:team_window_days:"
+OOM_PIN_WINDOW_DAYS = 1
+OOM_PIN_TTL_SECONDS = 14 * 24 * 60 * 60
+
+
+def _team_window_key(team_id: int) -> str:
+    return f"{TEAM_WINDOW_DAYS_REDIS_PREFIX}{team_id}"
 
 
 def get_team_max_window_days(team_id: int) -> int | None:
-    """The materialized per-team max insert-window (days), or None if unset.
+    """The pinned per-team max insert-window (days), or None if the team isn't pinned.
 
-    Best-effort: a Redis failure falls through to the default window — it never
-    blocks the insert. Clamps to >= 1 so a stray non-positive value can't collapse
-    every range into a zero-width (impossible) job."""
+    Best-effort: a Redis failure falls through to the default (uncapped) window — it never
+    blocks the insert. Clamps to >= 1 so a stray non-positive value can't collapse every
+    range into a zero-width (impossible) job."""
     try:
-        raw = redis.get_client().hget(TEAM_WINDOW_DAYS_REDIS_KEY, str(team_id))
+        raw = redis.get_client().get(_team_window_key(team_id))
     except Exception:
         return None
     if raw is None:
@@ -63,6 +67,29 @@ def get_team_max_window_days(team_id: int) -> int | None:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return None
+
+
+def pin_team_to_one_day_window(team_id: int) -> None:
+    """Pin a team to a 1-day insert window after it OOM'd. Best-effort; with a self-healing TTL."""
+    try:
+        redis.get_client().set(_team_window_key(team_id), OOM_PIN_WINDOW_DAYS, ex=OOM_PIN_TTL_SECONDS)
+    except Exception:
+        logger.warning("web_precompute.oom_pin_failed", team_id=team_id, exc_info=True)
+
+
+def web_ensure_precomputed(*, team: Team, **kwargs: Any) -> LazyComputationResult:
+    """`ensure_precomputed` for web analytics, with reactive per-team OOM capping.
+
+    A team runs uncapped until one of its precompute inserts OOMs; that pins it to a 1-day
+    window so later requests are capped before they can OOM again. The request that hits the
+    OOM still fails here and falls back to the live query — the pin only takes effect next time.
+    """
+    max_window_days = get_team_max_window_days(team.id)
+    result = ensure_precomputed(team=team, max_window_days=max_window_days, **kwargs)
+    if result.memory_exceeded and max_window_days is None:
+        pin_team_to_one_day_window(team.id)
+        logger.warning("web_precompute.oom_pinned_team", team_id=team.id, table=str(kwargs.get("table")))
+    return result
 
 
 # Fields stripped from the query payload before hashing.

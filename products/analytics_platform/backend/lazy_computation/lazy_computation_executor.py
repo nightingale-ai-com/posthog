@@ -337,6 +337,21 @@ def is_non_retryable_error(error: Exception) -> bool:
     return False
 
 
+# ClickHouse MEMORY_LIMIT_EXCEEDED. Surfaced on the result so callers can react to an
+# OOM (e.g. narrow a high-cardinality team's insert window) instead of parsing error text.
+MEMORY_LIMIT_EXCEEDED_CODE = 241
+
+
+def is_memory_limit_error(error: Exception) -> bool:
+    """True if the error (or any wrapped cause) is a ClickHouse MEMORY_LIMIT_EXCEEDED."""
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, ServerException) and current.code == MEMORY_LIMIT_EXCEEDED_CODE:
+            return True
+        current = current.__cause__
+    return False
+
+
 class LazyComputationTable(StrEnum):
     """Allowed target tables for lazy-computed results."""
 
@@ -392,6 +407,9 @@ class LazyComputationResult:
     ready: bool
     job_ids: list[uuid.UUID]
     errors: list[str] = field(default_factory=list)
+    # True if any insert failed with ClickHouse MEMORY_LIMIT_EXCEEDED. Lets callers react
+    # to an OOM (e.g. cap a high-cardinality team's future inserts) without parsing errors.
+    memory_exceeded: bool = False
 
 
 def compute_query_hash(query_info: QueryInfo) -> str:
@@ -766,6 +784,7 @@ class LazyComputationExecutor:
 
         errors: list[str] = []
         failures = 0
+        memory_exceeded = False
         start_time = time.monotonic()
         interval = self.poll_interval_seconds
         subscribed_ids: set[uuid.UUID] = set()
@@ -877,6 +896,7 @@ class LazyComputationExecutor:
                             )
                         except Exception as e:
                             insert_elapsed = time.monotonic() - insert_start
+                            memory_exceeded = memory_exceeded or is_memory_limit_error(e)
                             new_job.status = PreaggregationJob.Status.FAILED
                             new_job.error = str(e)
                             new_job.save()
@@ -901,20 +921,26 @@ class LazyComputationExecutor:
                             )
                             if is_non_retryable_error(e):
                                 errors.append(str(e))
-                                result = LazyComputationResult(ready=False, job_ids=[], errors=errors)
+                                result = LazyComputationResult(
+                                    ready=False, job_ids=[], errors=errors, memory_exceeded=memory_exceeded
+                                )
                                 _log_execution("non_retryable_error", result)
                                 return result
                             failures += 1
                             if failures > self.max_retries:
                                 errors.append(f"Max retries ({self.max_retries}) exceeded: {e}")
-                                result = LazyComputationResult(ready=False, job_ids=[], errors=errors)
+                                result = LazyComputationResult(
+                                    ready=False, job_ids=[], errors=errors, memory_exceeded=memory_exceeded
+                                )
                                 _log_execution("max_retries_exceeded", result)
                                 return result
                         did_work = True
 
                 if ttl_ranges and failures > self.max_retries:
                     errors.append("Max retries exceeded for computation")
-                    result = LazyComputationResult(ready=False, job_ids=[], errors=errors)
+                    result = LazyComputationResult(
+                        ready=False, job_ids=[], errors=errors, memory_exceeded=memory_exceeded
+                    )
                     _log_execution("max_retries_exceeded", result)
                     return result
 

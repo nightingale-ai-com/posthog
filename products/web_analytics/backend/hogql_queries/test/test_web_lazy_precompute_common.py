@@ -19,11 +19,15 @@ from posthog import redis
 from posthog.clickhouse.query_tagging import get_query_tag_value
 from posthog.hogql_queries.query_runner import AnalyticsQueryRunner
 
+from products.analytics_platform.backend.lazy_computation.lazy_computation_executor import LazyComputationResult
 from products.web_analytics.backend.hogql_queries.web_lazy_precompute_common import (
-    TEAM_WINDOW_DAYS_REDIS_KEY,
+    OOM_PIN_TTL_SECONDS,
+    _team_window_key,
     compute_filters_eligibility_hash,
     get_team_max_window_days,
     is_precompute_enabled_for_team,
+    pin_team_to_one_day_window,
+    web_ensure_precomputed,
 )
 from products.web_analytics.backend.hogql_queries.web_overview import WebOverviewQueryRunner
 
@@ -244,27 +248,62 @@ class TestFiltersEligibilityHashContextvarBinding(ClickhouseTestMixin, APIBaseTe
         assert captured["query_tag"] is None
 
 
-class TestGetTeamMaxWindowDays(BaseTest):
+class TestTeamWindowPin(BaseTest):
     def tearDown(self):
-        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+        redis.get_client().delete(_team_window_key(self.team.pk))
         super().tearDown()
 
-    def test_reads_materialized_window(self):
-        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "2")
-        assert get_team_max_window_days(self.team.pk) == 2
-
-    def test_team_not_in_hash_is_none(self):
-        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "2")
-        assert get_team_max_window_days(self.team.pk + 999_999) is None
-
-    def test_unset_key_is_none(self):
-        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+    def test_unpinned_team_is_none(self):
         assert get_team_max_window_days(self.team.pk) is None
+
+    def test_reads_pin(self):
+        redis.get_client().set(_team_window_key(self.team.pk), "1")
+        assert get_team_max_window_days(self.team.pk) == 1
 
     def test_non_integer_value_is_none(self):
-        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "not-a-number")
+        redis.get_client().set(_team_window_key(self.team.pk), "not-a-number")
         assert get_team_max_window_days(self.team.pk) is None
+
+    def test_non_positive_value_clamped_to_one(self):
+        redis.get_client().set(_team_window_key(self.team.pk), "0")
+        assert get_team_max_window_days(self.team.pk) == 1
 
     @mock.patch(f"{_COMMON}.redis.get_client", side_effect=Exception("redis down"))
     def test_redis_failure_falls_back_to_none(self, _client):
+        assert get_team_max_window_days(self.team.pk) is None
+
+    def test_pin_writes_one_day_with_ttl(self):
+        pin_team_to_one_day_window(self.team.pk)
+        client = redis.get_client()
+        assert get_team_max_window_days(self.team.pk) == 1
+        ttl = client.ttl(_team_window_key(self.team.pk))
+        assert 0 < ttl <= OOM_PIN_TTL_SECONDS
+
+
+class TestWebEnsurePrecomputed(BaseTest):
+    def tearDown(self):
+        redis.get_client().delete(_team_window_key(self.team.pk))
+        super().tearDown()
+
+    @mock.patch(f"{_COMMON}.ensure_precomputed")
+    def test_pins_team_on_oom(self, mock_ensure):
+        mock_ensure.return_value = LazyComputationResult(ready=False, job_ids=[], memory_exceeded=True)
+        web_ensure_precomputed(team=self.team, insert_query="SELECT 1", table=None)
+        # ran uncapped (no pin yet), then pinned for next time
+        assert mock_ensure.call_args.kwargs["max_window_days"] is None
+        assert get_team_max_window_days(self.team.pk) == 1
+
+    @mock.patch(f"{_COMMON}.ensure_precomputed")
+    def test_passes_existing_pin_and_does_not_repin(self, mock_ensure):
+        pin_team_to_one_day_window(self.team.pk)
+        mock_ensure.return_value = LazyComputationResult(ready=False, job_ids=[], memory_exceeded=True)
+        web_ensure_precomputed(team=self.team, insert_query="SELECT 1", table=None)
+        # already pinned → request runs capped; an OOM here doesn't re-pin (cap already applied)
+        assert mock_ensure.call_args.kwargs["max_window_days"] == 1
+        assert get_team_max_window_days(self.team.pk) == 1
+
+    @mock.patch(f"{_COMMON}.ensure_precomputed")
+    def test_no_pin_on_success(self, mock_ensure):
+        mock_ensure.return_value = LazyComputationResult(ready=True, job_ids=[], memory_exceeded=False)
+        web_ensure_precomputed(team=self.team, insert_query="SELECT 1", table=None)
         assert get_team_max_window_days(self.team.pk) is None
