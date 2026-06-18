@@ -30,6 +30,7 @@ from posthog.hogql.parser import parse_select
 from posthog.hogql.placeholders import replace_placeholders
 from posthog.hogql.printer import prepare_and_print_ast
 
+from posthog import redis
 from posthog.clickhouse.client import sync_execute
 from posthog.clickhouse.preaggregation.sql import DISTRIBUTED_PREAGGREGATION_RESULTS_TABLE
 from posthog.clickhouse.query_tagging import tags_context
@@ -247,12 +248,17 @@ def parse_ttl_schedule(
 def split_ranges_by_ttl(
     ranges: list[tuple[datetime, datetime]],
     schedule: TtlSchedule,
+    max_window_days: int | None = None,
 ) -> list[tuple[datetime, datetime, int]]:
     """Split time ranges at TTL boundaries.
 
     Re-expands each range into daily windows, assigns a TTL per window, and
     merges consecutive windows with the same TTL. This prevents a single job
     from covering days with different TTL requirements.
+
+    `max_window_days` additionally caps the merged job width: a merge also breaks
+    when adding the next day would exceed it. This is how a very high-cardinality
+    team's window is bounded so its GROUP BY stays under the memory limit.
     """
     result: list[tuple[datetime, datetime, int]] = []
 
@@ -266,7 +272,8 @@ def split_ranges_by_ttl(
 
         for window_start, window_end in windows[1:]:
             ttl = schedule.get_ttl(window_start)
-            if ttl == current_ttl:
+            exceeds_cap = max_window_days is not None and (window_end - current_start) > timedelta(days=max_window_days)
+            if ttl == current_ttl and not exceeds_cap:
                 current_end = window_end
             else:
                 result.append((current_start, current_end, current_ttl))
@@ -276,6 +283,31 @@ def split_ranges_by_ttl(
         result.append((current_start, current_end, current_ttl))
 
     return result
+
+
+# Redis hash {team_id: window_days} of per-team max insert-windows, materialized
+# daily by the `web_precompute_window_sizing` Dagster job (which writes this key
+# directly). The executor reads it to cap a very high-cardinality team's window so
+# its GROUP BY stays under the memory limit; teams without an entry use the default
+# TTL-merged window.
+TEAM_WINDOW_DAYS_REDIS_KEY = "preagg:team_window_days"
+
+
+def get_team_max_window_days(team_id: int) -> int | None:
+    """The materialized per-team max insert-window (days), or None if unset.
+
+    Best-effort: a Redis failure falls through to the default window — it never
+    blocks the insert."""
+    try:
+        raw = redis.get_client().hget(TEAM_WINDOW_DAYS_REDIS_KEY, str(team_id))
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 # ClickHouse error codes that should NOT be retried.
@@ -752,6 +784,9 @@ class LazyComputationExecutor:
         """
         insert_fn = run_insert or (lambda t, j: run_lazy_computation_insert(t, j, query_info))
         query_hash = compute_query_hash(query_info)
+        # Cap the job window for very high-cardinality teams (materialized in Redis by
+        # the window-sizing Dagster job). None → no cap → default TTL-merged window.
+        max_window_days = get_team_max_window_days(team.id)
 
         errors: list[str] = []
         failures = 0
@@ -805,7 +840,7 @@ class LazyComputationExecutor:
 
                 # Step 2: Find missing ranges, split at TTL boundaries
                 missing_ranges = find_missing_contiguous_windows(fresh_jobs, start, end)
-                ttl_ranges = split_ranges_by_ttl(missing_ranges, self.ttl_schedule)
+                ttl_ranges = split_ranges_by_ttl(missing_ranges, self.ttl_schedule, max_window_days=max_window_days)
 
                 if had_ready_at_start is None:
                     had_ready_at_start = any(j.status == PreaggregationJob.Status.READY for j in fresh_jobs)

@@ -17,6 +17,7 @@ from posthog.hogql import ast
 from posthog.hogql.parser import parse_select
 from posthog.hogql.query import execute_hogql_query
 
+from posthog import redis
 from posthog.clickhouse.client import sync_execute
 from posthog.clickhouse.preaggregation.sql import DISTRIBUTED_PREAGGREGATION_RESULTS_TABLE
 from posthog.hogql_queries.insights.trends.trends_query_runner import TrendsQueryRunner
@@ -33,6 +34,7 @@ from products.analytics_platform.backend.lazy_computation.lazy_computation_execu
     DEFAULT_WAIT_TIMEOUT_SECONDS,
     NON_RETRYABLE_CLICKHOUSE_ERROR_CODES,
     PREAGGREGATION_INSERT_QUORUM,
+    TEAM_WINDOW_DAYS_REDIS_KEY,
     LazyComputationExecutor,
     LazyComputationResult,
     LazyComputationTable,
@@ -46,6 +48,7 @@ from products.analytics_platform.backend.lazy_computation.lazy_computation_execu
     ensure_precomputed,
     filter_overlapping_jobs,
     find_missing_contiguous_windows,
+    get_team_max_window_days,
     is_non_retryable_error,
     parse_ttl_schedule,
     run_lazy_computation_insert,
@@ -1273,6 +1276,24 @@ class TestSplitRangesByTtl(BaseTest):
         ranges = [(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 4, tzinfo=UTC))]
         result = split_ranges_by_ttl(ranges, schedule)
         assert result == [(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 4, tzinfo=UTC), 3600)]
+
+    def test_max_window_days_caps_merged_range(self):
+        schedule = TtlSchedule.from_seconds(3600)  # uniform TTL would otherwise merge to one 7-day job
+        ranges = [(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 8, tzinfo=UTC))]
+        result = split_ranges_by_ttl(ranges, schedule, max_window_days=2)
+        assert all((end - start) <= timedelta(days=2) for start, end, _ in result)
+        assert result[0][0] == datetime(2024, 1, 1, tzinfo=UTC)
+        assert result[-1][1] == datetime(2024, 1, 8, tzinfo=UTC)
+        for (_s1, e1, _t1), (s2, _e2, _t2) in zip(result, result[1:]):
+            assert e1 == s2  # contiguous, gap-free, overlap-free
+        assert all(ttl == 3600 for _s, _e, ttl in result)
+
+    def test_max_window_days_none_is_unbounded(self):
+        schedule = TtlSchedule.from_seconds(3600)
+        ranges = [(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 8, tzinfo=UTC))]
+        assert split_ranges_by_ttl(ranges, schedule, max_window_days=None) == [
+            (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 8, tzinfo=UTC), 3600)
+        ]
 
     def test_range_splits_at_ttl_boundary(self):
         now = django_timezone.now()
@@ -2749,3 +2770,63 @@ class TestInsertSettingsAppliedToInserts(BaseTest):
 
         assert mock_execute.call_count == 1
         assert mock_execute.call_args.kwargs["settings"] == _get_insert_settings(self.team.pk)
+
+
+class TestPerTeamWindowCap(ClickhouseTestMixin, BaseTest):
+    def tearDown(self):
+        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+        super().tearDown()
+
+    def _query_info(self) -> QueryInfo:
+        s = parse_select(
+            """
+            SELECT toStartOfDay(timestamp) as time_window_start, [] as breakdown_value,
+                   uniqExactState(person_id) as uniq_exact_state
+            FROM events WHERE event = '$pageview' GROUP BY time_window_start
+            """
+        )
+        assert isinstance(s, ast.SelectQuery)
+        return QueryInfo(query=s, table=LazyComputationTable.PREAGGREGATION_RESULTS, timezone="UTC")
+
+    def _ready_windows(self, job_ids: list) -> list:
+        jobs = [PreaggregationJob.objects.get(id=jid) for jid in job_ids]
+        assert all(j.status == PreaggregationJob.Status.READY for j in jobs)
+        return sorted((j.time_range_start, j.time_range_end) for j in jobs)
+
+    def test_get_team_max_window_days_reads_redis(self):
+        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "2")
+        assert get_team_max_window_days(self.team.pk) == 2
+        assert get_team_max_window_days(self.team.pk + 999_999) is None  # not in the hash
+
+    def test_get_team_max_window_days_none_when_unset(self):
+        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+        assert get_team_max_window_days(self.team.pk) is None
+
+    def test_execute_caps_window_for_listed_team(self):
+        redis.get_client().hset(TEAM_WINDOW_DAYS_REDIS_KEY, str(self.team.pk), "1")
+        result = LazyComputationExecutor().execute(
+            team=self.team,
+            query_info=self._query_info(),
+            start=datetime(2024, 1, 1, tzinfo=UTC),
+            end=datetime(2024, 1, 8, tzinfo=UTC),  # 7 days
+            run_insert=lambda t, j: None,  # no-op insert
+        )
+        assert result.ready is True
+        windows = self._ready_windows(result.job_ids)
+        assert len(windows) == 7
+        assert all((end - start) == timedelta(days=1) for start, end in windows)
+
+    def test_execute_no_cap_when_team_unlisted(self):
+        redis.get_client().delete(TEAM_WINDOW_DAYS_REDIS_KEY)
+        result = LazyComputationExecutor().execute(
+            team=self.team,
+            query_info=self._query_info(),
+            start=datetime(2024, 1, 1, tzinfo=UTC),
+            end=datetime(2024, 1, 8, tzinfo=UTC),
+            run_insert=lambda t, j: None,
+        )
+        assert result.ready is True
+        # uniform default schedule + no cap → one merged 7-day job
+        assert self._ready_windows(result.job_ids) == [
+            (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 8, tzinfo=UTC))
+        ]
