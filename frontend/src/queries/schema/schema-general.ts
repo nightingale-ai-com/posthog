@@ -6800,6 +6800,7 @@ export const externalDataSources = [
     'Streamlabs',
     'Datorama',
     'Ahrefs',
+    'Neon',
     'Custom',
 ] as const
 
