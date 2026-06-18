@@ -1,6 +1,8 @@
-# MCP analytics (`mcp_tool_call` events)
+# MCP analytics (`$mcp_tool_call` events)
 
-PostHog's own MCP server emits a `mcp_tool_call` event on the shared `events` table every time an agent invokes a tool. There is **no dedicated ClickHouse table** — all fields live as `$mcp_*` properties on `events`, queried directly with `posthog:execute-sql`. This is the data behind the MCP analytics dashboard, tool-quality, and tool-detail screens; every metric on those screens is reproducible as HogQL over this event.
+Any MCP server instrumented with PostHog's MCP analytics SDK — including PostHog's own MCP server — emits a `$mcp_tool_call` event on the shared `events` table every time an agent invokes a tool. There is **no dedicated ClickHouse table** — all fields live as `$mcp_*` properties on `events`, queried directly with `posthog:execute-sql`. This is the data behind the MCP analytics dashboard, tool-quality, and tool-detail screens; every metric on those screens is reproducible as HogQL over this event.
+
+> **Always query the canonical `$mcp_tool_call`, never the legacy `mcp_tool_call`.** During the migration cutover PostHog's server dual-emits an unprefixed `mcp_tool_call` alias, so matching both names (e.g. `event IN ('mcp_tool_call', '$mcp_tool_call')`) double-counts every call. Filter on `$mcp_tool_call` only.
 
 **HogQL is the primary path here.** Session listing, per-session tool calls, tool-level metrics (error rate, latency, adoption), harness breakdowns, time series, and co-occurrence are all just aggregations over this event — query them with `execute-sql`. The only typed tools are for things SQL can't express: `posthog:mcp-analytics-intent-clusters-retrieve` / `...-recompute` (embedding-based intent clustering) and `posthog:mcp-analytics-sessions-generate-intent` (LLM session summary).
 
@@ -25,7 +27,7 @@ PostHog's own MCP server emits a `mcp_tool_call` event on the shared `events` ta
 coalesce(nullIf(toString(properties.$mcp_exec_tool_call_name), ''), toString(properties.$mcp_tool_name))
 ```
 
-**Failures with detail.** `mcp_tool_call` carries `$mcp_is_error` + `$mcp_error_message`; richer stack/exception data is on `$exception` events (`$exception_message`), correlated by `$mcp_session_id` / `$session_id` and timestamp.
+**Failures with detail.** `$mcp_tool_call` carries `$mcp_is_error` + `$mcp_error_message`; richer stack/exception data is on `$exception` events (`$exception_message`), correlated by `$mcp_session_id` / `$session_id` and timestamp.
 
 ## Example queries
 
@@ -37,7 +39,7 @@ SELECT
     countIf(toBool(properties.$mcp_is_error)) AS errors,
     round(countIf(toBool(properties.$mcp_is_error)) * 100.0 / count(), 1) AS error_rate_pct
 FROM events
-WHERE event = 'mcp_tool_call'
+WHERE event = '$mcp_tool_call'
     -- effective tool name: new-SDK events put the real tool in $mcp_exec_tool_call_name
     AND coalesce(nullIf(toString(properties.$mcp_exec_tool_call_name), ''), toString(properties.$mcp_tool_name)) = '<tool-name>'
     AND timestamp >= now() - INTERVAL 7 DAY
@@ -57,7 +59,7 @@ SELECT
     uniq(distinct_id) AS users,
     countDistinctIf(toString(properties.$mcp_session_id), toString(properties.$mcp_session_id) != '') AS sessions
 FROM events
-WHERE event = 'mcp_tool_call'
+WHERE event = '$mcp_tool_call'
     AND coalesce(nullIf(toString(properties.$mcp_exec_tool_call_name), ''), toString(properties.$mcp_tool_name)) != ''
     AND timestamp >= now() - INTERVAL 30 DAY
 GROUP BY tool
@@ -71,7 +73,7 @@ SELECT toDate(timestamp) AS day,
     countIf(NOT toBool(properties.$mcp_is_error)) AS successes,
     countIf(toBool(properties.$mcp_is_error)) AS errors
 FROM events
-WHERE event = 'mcp_tool_call' AND timestamp >= now() - INTERVAL 30 DAY
+WHERE event = '$mcp_tool_call' AND timestamp >= now() - INTERVAL 30 DAY
 GROUP BY day ORDER BY day
 ```
 
@@ -87,7 +89,7 @@ SELECT
     uniq(distinct_id) AS users,
     round(uniq(distinct_id) * 100.0 / (
         SELECT uniq(distinct_id) FROM events
-        WHERE event = 'mcp_tool_call' AND timestamp >= now() - INTERVAL 30 DAY
+        WHERE event = '$mcp_tool_call' AND timestamp >= now() - INTERVAL 30 DAY
     ), 1) AS pct_of_users
 FROM (
     SELECT
@@ -116,7 +118,7 @@ FROM (
             distinct_id,
             lower(trim(replaceRegexpOne(toString(properties.$mcp_client_name), '\\s*\\(via mcp-remote[^)]*\\)\\s*', ''))) AS h
         FROM events
-        WHERE event = 'mcp_tool_call' AND timestamp >= now() - INTERVAL 30 DAY
+        WHERE event = '$mcp_tool_call' AND timestamp >= now() - INTERVAL 30 DAY
     )
 )
 GROUP BY harness
@@ -136,7 +138,7 @@ FROM (
             OVER (PARTITION BY properties.$mcp_session_id ORDER BY timestamp
                   ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS prev_tool
     FROM events
-    WHERE event = 'mcp_tool_call' AND timestamp >= now() - INTERVAL 7 DAY
+    WHERE event = '$mcp_tool_call' AND timestamp >= now() - INTERVAL 7 DAY
 )
 WHERE tool = '<tool-name>' AND prev_tool != '' AND prev_tool != tool
 GROUP BY prev_tool ORDER BY co_occurrences DESC LIMIT 5
