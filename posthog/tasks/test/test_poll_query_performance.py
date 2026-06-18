@@ -71,14 +71,19 @@ class TestPollQueryPerformanceTask(SimpleTestCase):
 
     @patch("posthog.tasks.tasks.logger.error")
     @patch("posthog.tasks.tasks.poll_query_performance.apply_async")
+    @patch("posthog.tasks.poll_query_performance.poll_query_performance")
     def test_poll_query_performance_runs_and_restarts_itself_with_delay(
-        self, mock_apply_async: MagicMock, mock_logger_error: MagicMock
+        self,
+        mock_poll_query_performance: MagicMock,
+        mock_apply_async: MagicMock,
+        mock_logger_error: MagicMock,
     ) -> None:
         redis_client = get_client()
         key = 1234
         redis_client.set(Polling._SINGLETON_REDIS_KEY, Polling._encode_redis_key(key))
         posthog.tasks.tasks.poll_query_performance(key)
 
+        mock_poll_query_performance.assert_called_once_with()
         mock_logger_error.assert_not_called()
         mock_apply_async.assert_called_once()
         self.assertTrue(0 < mock_apply_async.call_args.kwargs["countdown"] < 2)
@@ -89,9 +94,13 @@ class TestPollQueryPerformanceTask(SimpleTestCase):
 
     @patch("posthog.tasks.tasks.logger.error")
     @patch("posthog.tasks.tasks.poll_query_performance.delay")
+    @patch("posthog.tasks.poll_query_performance.poll_query_performance")
     @patch("time.time_ns", MagicMock(side_effect=[int(1e9), int(4e9)]))
     def test_poll_query_performance_runs_and_restarts_itself_with_no_delay_if_it_takes_too_long(
-        self, mock_delay: MagicMock, mock_logger_error: MagicMock
+        self,
+        mock_poll_query_performance: MagicMock,
+        mock_delay: MagicMock,
+        mock_logger_error: MagicMock,
     ) -> None:
         redis_client = get_client()
         key = 1234
@@ -99,6 +108,7 @@ class TestPollQueryPerformanceTask(SimpleTestCase):
         redis_client.set(Polling._SINGLETON_REDIS_KEY, encoded_key)
         posthog.tasks.tasks.poll_query_performance(key)
 
+        mock_poll_query_performance.assert_called_once_with()
         mock_logger_error.assert_not_called()
         new_key = int(1e9)
         mock_delay.assert_called_once_with(new_key)
