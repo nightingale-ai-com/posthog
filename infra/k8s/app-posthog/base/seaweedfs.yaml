@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: posthog-seaweedfs
+  labels:
+    app.kubernetes.io/name: posthog-seaweedfs
+    app.kubernetes.io/part-of: posthog
+spec:
+  serviceName: posthog-seaweedfs
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-seaweedfs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-seaweedfs
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: seaweedfs
+          image: docker.io/chrislusf/seaweedfs:4.29
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              (
+                while true; do
+                  ROOT_USER="$(cat /secrets/OBJECT_STORAGE_ACCESS_KEY_ID)"
+                  ROOT_PASSWORD="$(cat /secrets/OBJECT_STORAGE_SECRET_ACCESS_KEY)"
+                  printf 's3.configure -access_key=%s -secret_key=%s -user=posthog -actions=Admin -apply\ns3.configure -user=anonymous -actions=Admin -apply\ns3.bucket.create -name posthog\ns3.bucket.create -name ducklake-dev\ns3.bucket.create -name ai-blobs\n' "$ROOT_USER" "$ROOT_PASSWORD" \
+                    | /usr/bin/weed shell -master=localhost:9333 >/dev/null 2>&1 || true
+                  BUCKETS="$(echo 's3.bucket.list' | /usr/bin/weed shell -master=localhost:9333 2>/dev/null || true)"
+                  IDENTITIES="$(echo 's3.configure' | /usr/bin/weed shell -master=localhost:9333 2>/dev/null || true)"
+                  if echo "$BUCKETS" | grep -q posthog \
+                    && echo "$BUCKETS" | grep -q ducklake-dev \
+                    && echo "$BUCKETS" | grep -q ai-blobs \
+                    && echo "$IDENTITIES" | grep -q "$ROOT_USER" \
+                    && echo "$IDENTITIES" | grep -q anonymous; then
+                    touch /tmp/objectstorage-ready
+                    echo "SeaweedFS ready with required buckets and identities"
+                    break
+                  fi
+                  sleep 2
+                done
+              ) &
+              exec /usr/bin/weed server -s3 -s3.port=8333 -master.port=9333 -dir=/data -volume.max=1000 -master.volumePreallocate=false
+          ports:
+            - name: s3
+              containerPort: 8333
+            - name: master
+              containerPort: 9333
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/tmp/objectstorage-ready"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: s3
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: app-secrets
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: app-secrets
+          secret:
+            secretName: posthog-app-secrets
+            items:
+              - key: OBJECT_STORAGE_ACCESS_KEY_ID
+                path: OBJECT_STORAGE_ACCESS_KEY_ID
+              - key: OBJECT_STORAGE_SECRET_ACCESS_KEY
+                path: OBJECT_STORAGE_SECRET_ACCESS_KEY
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-seaweedfs
+  labels:
+    app.kubernetes.io/name: posthog-seaweedfs
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-seaweedfs
+  ports:
+    - name: s3
+      port: 8333
+      targetPort: s3
+    - name: master
+      port: 9333
+      targetPort: master

@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: posthog
+resources:
+  - namespace.yaml
+  - ../../base
+images:
+  - name: docker.io/posthog/posthog
+    newTag: latest
+  - name: ghcr.io/posthog/posthog-node
+    newTag: master
+  - name: ghcr.io/posthog/posthog/capture
+    newTag: master
+  - name: ghcr.io/posthog/posthog/capture-logs
+    newTag: master
+  - name: ghcr.io/posthog/posthog/property-defs-rs
+    newTag: master
+  - name: ghcr.io/posthog/posthog/feature-flags
+    newTag: master
+  - name: ghcr.io/posthog/posthog/hypercache-server
+    newTag: master
+  - name: ghcr.io/posthog/posthog/personhog-replica
+    newTag: master
+  - name: ghcr.io/posthog/posthog/personhog-router
+    newTag: master
+  - name: ghcr.io/posthog/posthog/livestream
+    newTag: master
+  - name: ghcr.io/posthog/posthog/cyclotron-janitor
+    newTag: master
+  - name: ghcr.io/posthog/posthog/cymbal
+    newTag: master

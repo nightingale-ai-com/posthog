@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: posthog-zookeeper
+  labels:
+    app.kubernetes.io/name: posthog-zookeeper
+    app.kubernetes.io/part-of: posthog
+spec:
+  serviceName: zookeeper
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-zookeeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-zookeeper
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: zookeeper
+          image: docker.io/zookeeper:3.7.0
+          env:
+            - name: ZOO_AUTOPURGE_PURGEINTERVAL
+              value: "1"
+            - name: ZOO_AUTOPURGE_SNAPRETAINCOUNT
+              value: "3"
+          ports:
+            - name: client
+              containerPort: 2181
+          readinessProbe:
+            tcpSocket:
+              port: client
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: client
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              subPath: data
+            - name: data
+              mountPath: /datalog
+              subPath: datalog
+            - name: data
+              mountPath: /logs
+              subPath: logs
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+  labels:
+    app.kubernetes.io/name: posthog-zookeeper
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-zookeeper
+  ports:
+    - name: client
+      port: 2181
+      targetPort: client

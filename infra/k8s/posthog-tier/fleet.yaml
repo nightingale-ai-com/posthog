@@ -1,0 +1,22 @@
+# Fleet bundle for the PostHog homedev tier. The home-dev-infra GitRepo should
+# path-scope to this directory so this bundle stays self-contained.
+defaultNamespace: posthog
+diff:
+  comparePatches:
+    - apiVersion: v1
+      kind: Secret
+      name: posthog-postgres-secrets
+      namespace: posthog
+      jsonPointers:
+        - "/data"
+    - apiVersion: v1
+      kind: Secret
+      name: posthog-app-secrets
+      namespace: posthog
+      jsonPointers:
+        - "/data"
+targets:
+  - name: posthog
+    clusterSelector:
+      matchLabels:
+        env: staging

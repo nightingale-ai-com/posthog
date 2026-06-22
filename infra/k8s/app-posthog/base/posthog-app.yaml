@@ -1,0 +1,1191 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-web
+  labels:
+    app.kubernetes.io/name: posthog-web
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-web
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+    - name: metrics
+      port: 8001
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-web
+  labels:
+    app.kubernetes.io/name: posthog-web
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-web
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: web
+          image: docker.io/posthog/posthog:latest
+          command: ["/bin/bash", "-ec", "./bin/migrate && ./bin/docker-server"]
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: metrics
+              containerPort: 8001
+          readinessProbe:
+            httpGet:
+              path: /_health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /_health
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-worker
+  labels:
+    app.kubernetes.io/name: posthog-worker
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-worker
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: worker
+          image: docker.io/posthog/posthog:latest
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT
+              export PROMETHEUS_MULTIPROC_DIR=/tmp/posthog_celery_prometheus
+              source ./bin/celery-queues.env
+              ./bin/docker-worker-beat &
+              SKIP_ASYNC_MIGRATIONS_SETUP=1 CELERY_WORKER_QUEUES=$CELERY_WORKER_QUEUES celery -A posthog worker -Ofair -n node@%h --without-mingle --without-heartbeat --concurrency=${WEB_CONCURRENCY} &
+              wait -n
+          env:
+            - name: WEB_CONCURRENCY
+              value: "2"
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-temporal-django-worker
+  labels:
+    app.kubernetes.io/name: posthog-temporal-django-worker
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-temporal-django-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-temporal-django-worker
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: worker
+          image: docker.io/posthog/posthog:latest
+          command: ["/bin/bash", "-ec", "SKIP_ASYNC_MIGRATIONS_SETUP=1 ./bin/temporal-django-worker"]
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-plugins
+  labels:
+    app.kubernetes.io/name: posthog-plugins
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-plugins
+  ports:
+    - name: http
+      port: 6738
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-plugins
+  labels:
+    app.kubernetes.io/name: posthog-plugins
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-plugins
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-plugins
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: plugins
+          image: ghcr.io/posthog/posthog-node:master
+          command: ["node", "nodejs/dist/index.js"]
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          ports:
+            - name: http
+              containerPort: 6738
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-ingestion-general
+  labels:
+    app.kubernetes.io/name: posthog-ingestion-general
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-ingestion-general
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-ingestion-general
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: ingestion-general
+          image: ghcr.io/posthog/posthog-node:master
+          command: ["node", "nodejs/dist/index.js"]
+          env:
+            - name: PLUGIN_SERVER_MODE
+              value: ingestion-v2-combined
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-ingestion-sessionreplay
+  labels:
+    app.kubernetes.io/name: posthog-ingestion-sessionreplay
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-ingestion-sessionreplay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-ingestion-sessionreplay
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: ingestion-sessionreplay
+          image: ghcr.io/posthog/posthog-node:master
+          command: ["node", "nodejs/dist/index.js"]
+          env:
+            - name: PLUGIN_SERVER_MODE
+              value: recordings-blob-ingestion-v2
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-capture
+  labels:
+    app.kubernetes.io/name: posthog-capture
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-capture
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-capture
+  labels:
+    app.kubernetes.io/name: posthog-capture
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-capture
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-capture
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: capture
+          image: ghcr.io/posthog/posthog/capture:master
+          env:
+            - name: ADDRESS
+              value: 0.0.0.0:3000
+            - name: CAPTURE_MODE
+              value: events
+            - name: KAFKA_TOPIC
+              value: events_plugin_ingestion
+            - name: CAPTURE_V1_SINKS
+              value: msk
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_HOSTS
+              value: posthog-redpanda:9092
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_MAIN
+              value: events_plugin_ingestion
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HISTORICAL
+              value: events_plugin_ingestion_historical
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_OVERFLOW
+              value: events_plugin_ingestion_overflow
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_DLQ
+              value: events_plugin_ingestion_dlq
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_EXCEPTION
+              value: ingestion-errortracking-main
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_HEATMAP
+              value: heatmaps_ingestion
+            - name: CAPTURE_V1_SINK_MSK_KAFKA_TOPIC_CLIENT_INGESTION_WARNING
+              value: ingestion-clientwarnings-main-1
+            - name: RUST_LOG
+              value: info,rdkafka=warn
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+          ports:
+            - name: http
+              containerPort: 3000
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-property-defs-rs
+  labels:
+    app.kubernetes.io/name: posthog-property-defs-rs
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-property-defs-rs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-property-defs-rs
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: property-defs-rs
+          image: ghcr.io/posthog/posthog/property-defs-rs:master
+          env:
+            - name: SKIP_WRITES
+              value: "false"
+            - name: SKIP_READS
+              value: "false"
+            - name: FILTER_MODE
+              value: opt-out
+            - name: RUST_LOG
+              value: info
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-personhog-replica
+  labels:
+    app.kubernetes.io/name: posthog-personhog-replica
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-personhog-replica
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+    - name: metrics
+      port: 9100
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-personhog-replica
+  labels:
+    app.kubernetes.io/name: posthog-personhog-replica
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-personhog-replica
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-personhog-replica
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: personhog-replica
+          image: ghcr.io/posthog/posthog/personhog-replica:master
+          env:
+            - name: GRPC_ADDRESS
+              value: 0.0.0.0:50051
+            - name: METRICS_PORT
+              value: "9100"
+            - name: RUST_LOG
+              value: info
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: metrics
+              containerPort: 9100
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-personhog-router
+  labels:
+    app.kubernetes.io/name: posthog-personhog-router
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-personhog-router
+  ports:
+    - name: grpc
+      port: 50052
+      targetPort: grpc
+    - name: metrics
+      port: 9101
+      targetPort: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-personhog-router
+  labels:
+    app.kubernetes.io/name: posthog-personhog-router
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-personhog-router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-personhog-router
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: personhog-router
+          image: ghcr.io/posthog/posthog/personhog-router:master
+          env:
+            - name: GRPC_ADDRESS
+              value: 0.0.0.0:50052
+            - name: REPLICA_URL
+              value: http://posthog-personhog-replica:50051
+            - name: BACKEND_TIMEOUT_MS
+              value: "5000"
+            - name: METRICS_PORT
+              value: "9101"
+            - name: RUST_LOG
+              value: info
+          ports:
+            - name: grpc
+              containerPort: 50052
+            - name: metrics
+              containerPort: 9101
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-livestream
+  labels:
+    app.kubernetes.io/name: posthog-livestream
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-livestream
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-livestream
+  labels:
+    app.kubernetes.io/name: posthog-livestream
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-livestream
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-livestream
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: livestream
+          image: ghcr.io/posthog/posthog/livestream:master
+          env:
+            - name: LIVESTREAM_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-app-secrets
+                  key: LIVESTREAM_JWT_SECRET
+            - name: LIVESTREAM_MMDB_PATH
+              value: /GeoLite2-City.mmdb
+            - name: LIVESTREAM_CONSUMERS_EVENT_BROKERS
+              value: kafka:9092
+            - name: LIVESTREAM_CONSUMERS_EVENT_TOPIC
+              value: events_plugin_ingestion
+            - name: LIVESTREAM_CONSUMERS_EVENT_SECURITY_PROTOCOL
+              value: PLAINTEXT
+            - name: LIVESTREAM_CONSUMERS_EVENT_GROUP_ID
+              value: livestream
+            - name: LIVESTREAM_CONSUMERS_SESSION_RECORDING_BROKERS
+              value: kafka:9092
+            - name: LIVESTREAM_CONSUMERS_SESSION_RECORDING_TOPIC
+              value: session_recording_snapshot_item_events
+            - name: LIVESTREAM_CONSUMERS_SESSION_RECORDING_SECURITY_PROTOCOL
+              value: PLAINTEXT
+            - name: LIVESTREAM_CONSUMERS_SESSION_RECORDING_GROUP_ID
+              value: livestream-session-recordings
+            - name: LIVESTREAM_CONSUMERS_NOTIFICATION_ENABLED
+              value: "false"
+            - name: LIVESTREAM_REDIS_ADDRESS
+              value: posthog-redis
+            - name: LIVESTREAM_REDIS_PORT
+              value: "6379"
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-cyclotron-janitor
+  labels:
+    app.kubernetes.io/name: posthog-cyclotron-janitor
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-cyclotron-janitor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-cyclotron-janitor
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: cyclotron-janitor
+          image: ghcr.io/posthog/posthog/cyclotron-janitor:master
+          env:
+            - name: RUST_LOG
+              value: info
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-cymbal
+  labels:
+    app.kubernetes.io/name: posthog-cymbal
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-cymbal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-cymbal
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: cymbal
+          image: ghcr.io/posthog/posthog/cymbal:master
+          env:
+            - name: OBJECT_STORAGE_BUCKET
+              value: posthog
+            - name: OBJECT_STORAGE_ENDPOINT
+              value: http://posthog-seaweedfs:8333
+            - name: OBJECT_STORAGE_FORCE_PATH_STYLE
+              value: "true"
+            - name: BIND_HOST
+              value: 0.0.0.0
+            - name: BIND_PORT
+              value: "3302"
+            - name: MAXMIND_DB_PATH
+              value: /app/share/GeoLite2-City.mmdb
+            - name: RUST_LOG
+              value: info
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-replay-capture
+  labels:
+    app.kubernetes.io/name: posthog-replay-capture
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-replay-capture
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-replay-capture
+  labels:
+    app.kubernetes.io/name: posthog-replay-capture
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-replay-capture
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-replay-capture
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: replay-capture
+          image: ghcr.io/posthog/posthog/capture:master
+          env:
+            - name: ADDRESS
+              value: 0.0.0.0:3000
+            - name: CAPTURE_MODE
+              value: recordings
+            - name: KAFKA_TOPIC
+              value: session_recording_snapshot_item_events
+            - name: RUST_LOG
+              value: info,rdkafka=warn
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+          ports:
+            - name: http
+              containerPort: 3000
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-capture-ai
+  labels:
+    app.kubernetes.io/name: posthog-capture-ai
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-capture-ai
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-capture-ai
+  labels:
+    app.kubernetes.io/name: posthog-capture-ai
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-capture-ai
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-capture-ai
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: capture-ai
+          image: ghcr.io/posthog/posthog/capture:master
+          env:
+            - name: ADDRESS
+              value: 0.0.0.0:3000
+            - name: CAPTURE_MODE
+              value: events
+            - name: KAFKA_TOPIC
+              value: events_plugin_ingestion
+            - name: AI_S3_BUCKET
+              value: ai-blobs
+            - name: AI_S3_PREFIX
+              value: llma/
+            - name: AI_S3_ENDPOINT
+              value: http://posthog-seaweedfs:8333
+            - name: AI_S3_REGION
+              value: us-east-1
+            - name: AI_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-app-secrets
+                  key: OBJECT_STORAGE_ACCESS_KEY_ID
+            - name: AI_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-app-secrets
+                  key: OBJECT_STORAGE_SECRET_ACCESS_KEY
+            - name: RUST_LOG
+              value: info,rdkafka=warn
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+          ports:
+            - name: http
+              containerPort: 3000
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-capture-logs
+  labels:
+    app.kubernetes.io/name: posthog-capture-logs
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-capture-logs
+  ports:
+    - name: http
+      port: 4318
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-capture-logs
+  labels:
+    app.kubernetes.io/name: posthog-capture-logs
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-capture-logs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-capture-logs
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: capture-logs
+          image: ghcr.io/posthog/posthog/capture-logs:master
+          env:
+            - name: BIND_HOST
+              value: 0.0.0.0
+            - name: BIND_PORT
+              value: "4318"
+            - name: KAFKA_TOPIC
+              value: logs_ingestion
+            - name: KAFKA_METRICS_TOPIC
+              value: metrics_ingestion
+            - name: RUST_LOG
+              value: info,rdkafka=warn
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-app-secrets
+                  key: SECRET_KEY
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+          ports:
+            - name: http
+              containerPort: 4318
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-feature-flags
+  labels:
+    app.kubernetes.io/name: posthog-feature-flags
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-feature-flags
+  ports:
+    - name: http
+      port: 3001
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-feature-flags
+  labels:
+    app.kubernetes.io/name: posthog-feature-flags
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-feature-flags
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-feature-flags
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: feature-flags
+          image: ghcr.io/posthog/posthog/feature-flags:master
+          env:
+            - name: ADDRESS
+              value: 0.0.0.0:3001
+            - name: MAXMIND_DB_PATH
+              value: /app/share/GeoLite2-City.mmdb
+            - name: RUST_LOG
+              value: info
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          ports:
+            - name: http
+              containerPort: 3001
+          readinessProbe:
+            httpGet:
+              path: /_readiness
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-hypercache
+  labels:
+    app.kubernetes.io/name: posthog-hypercache
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-hypercache
+  ports:
+    - name: http
+      port: 3002
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-hypercache
+  labels:
+    app.kubernetes.io/name: posthog-hypercache
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-hypercache
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-hypercache
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: hypercache
+          image: ghcr.io/posthog/posthog/hypercache-server:master
+          env:
+            - name: ADDRESS
+              value: 0.0.0.0:3002
+            - name: RUST_LOG
+              value: info
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+          ports:
+            - name: http
+              containerPort: 3002
+          readinessProbe:
+            httpGet:
+              path: /_readiness
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-recording-api
+  labels:
+    app.kubernetes.io/name: posthog-recording-api
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-recording-api
+  ports:
+    - name: http
+      port: 6738
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-recording-api
+  labels:
+    app.kubernetes.io/name: posthog-recording-api
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-recording-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-recording-api
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: recording-api
+          image: ghcr.io/posthog/posthog-node:master
+          command: ["node", "nodejs/dist/index.js"]
+          env:
+            - name: PLUGIN_SERVER_MODE
+              value: recording-api
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          ports:
+            - name: http
+              containerPort: 6738
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-ingestion-error-tracking
+  labels:
+    app.kubernetes.io/name: posthog-ingestion-error-tracking
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-ingestion-error-tracking
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-ingestion-error-tracking
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: ingestion-error-tracking
+          image: ghcr.io/posthog/posthog-node:master
+          command: ["node", "nodejs/dist/index.js"]
+          env:
+            - name: PLUGIN_SERVER_MODE
+              value: ingestion-errortracking
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-ingestion-logs
+  labels:
+    app.kubernetes.io/name: posthog-ingestion-logs
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-ingestion-logs
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-ingestion-logs
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: ingestion-logs
+          image: ghcr.io/posthog/posthog-node:master
+          command: ["node", "nodejs/dist/index.js"]
+          env:
+            - name: PLUGIN_SERVER_MODE
+              value: ingestion-logs
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-ingestion-traces
+  labels:
+    app.kubernetes.io/name: posthog-ingestion-traces
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-ingestion-traces
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-ingestion-traces
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: ingestion-traces
+          image: ghcr.io/posthog/posthog-node:master
+          command: ["node", "nodejs/dist/index.js"]
+          env:
+            - name: PLUGIN_SERVER_MODE
+              value: ingestion-traces
+          envFrom:
+            - configMapRef:
+                name: posthog-app-config
+            - secretRef:
+                name: posthog-app-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi

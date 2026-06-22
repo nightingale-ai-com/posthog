@@ -1,0 +1,256 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: posthog-clickhouse-config
+  labels:
+    app.kubernetes.io/name: posthog-clickhouse
+    app.kubernetes.io/part-of: posthog
+data:
+  posthog.xml: |
+    <clickhouse>
+        <tcp_port>9000</tcp_port>
+        <remote_servers>
+            <posthog>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </posthog>
+            <posthog_single_shard>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </posthog_single_shard>
+            <posthog_migrations>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </posthog_migrations>
+            <posthog_writable>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </posthog_writable>
+            <posthog_primary_replica>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </posthog_primary_replica>
+            <ai_events>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </ai_events>
+            <aux>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </aux>
+            <ops>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </ops>
+            <sessions>
+                <shard>
+                    <replica>
+                        <host>posthog-clickhouse-0.posthog-clickhouse.posthog.svc.cluster.local</host>
+                        <port>9000</port>
+                    </replica>
+                </shard>
+            </sessions>
+        </remote_servers>
+        <named_collections>
+            <msk_cluster><kafka_broker_list from_env="KAFKA_HOSTS"/></msk_cluster>
+            <warpstream_ingestion><kafka_broker_list from_env="KAFKA_HOSTS"/></warpstream_ingestion>
+            <warpstream_calculated_events><kafka_broker_list from_env="KAFKA_HOSTS"/></warpstream_calculated_events>
+            <warpstream_replay><kafka_broker_list from_env="KAFKA_HOSTS"/></warpstream_replay>
+            <warpstream_shared><kafka_broker_list from_env="KAFKA_HOSTS"/></warpstream_shared>
+            <warpstream_cyclotron><kafka_broker_list from_env="KAFKA_HOSTS"/></warpstream_cyclotron>
+        </named_collections>
+        <macros>
+            <shard>01</shard>
+            <replica>ch1</replica>
+            <hostClusterType>online</hostClusterType>
+            <hostClusterRole>data</hostClusterRole>
+        </macros>
+        <zookeeper>
+            <node>
+                <host>zookeeper</host>
+                <port>2181</port>
+            </node>
+        </zookeeper>
+        <crash_log>
+            <database>system</database>
+            <table>crash_log</table>
+            <partition_by />
+            <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+            <max_size_rows>1024</max_size_rows>
+            <reserved_size_rows>1024</reserved_size_rows>
+            <buffer_size_rows_flush_threshold>512</buffer_size_rows_flush_threshold>
+            <flush_on_crash>true</flush_on_crash>
+        </crash_log>
+    </clickhouse>
+  users-posthog.xml: |
+    <clickhouse>
+        <profiles>
+            <default>
+                <max_memory_usage>10000000000</max_memory_usage>
+                <compatibility>26.3</compatibility>
+                <enable_materialized_cte>1</enable_materialized_cte>
+                <async_insert>0</async_insert>
+                <optimize_empty_string_comparisons>0</optimize_empty_string_comparisons>
+                <distributed_product_mode>global</distributed_product_mode>
+                <enable_parallel_replicas>0</enable_parallel_replicas>
+                <max_parallel_replicas>1</max_parallel_replicas>
+                <allow_experimental_window_functions>1</allow_experimental_window_functions>
+                <allow_suspicious_low_cardinality_types>1</allow_suspicious_low_cardinality_types>
+                <insert_distributed_sync>1</insert_distributed_sync>
+                <throw_on_max_partitions_per_insert_block>false</throw_on_max_partitions_per_insert_block>
+                <number_of_mutations_to_throw>1</number_of_mutations_to_throw>
+            </default>
+        </profiles>
+        <users>
+            <default>
+                <password></password>
+                <networks>
+                    <ip>::/0</ip>
+                </networks>
+                <profile>default</profile>
+                <quota>default</quota>
+                <access_management>1</access_management>
+                <named_collection_control>1</named_collection_control>
+                <show_named_collections>1</show_named_collections>
+                <show_named_collections_secrets>1</show_named_collections_secrets>
+            </default>
+        </users>
+    </clickhouse>
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: posthog-clickhouse
+  labels:
+    app.kubernetes.io/name: posthog-clickhouse
+    app.kubernetes.io/part-of: posthog
+spec:
+  serviceName: posthog-clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-clickhouse
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-clickhouse
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: clickhouse
+          image: docker.io/clickhouse/clickhouse-server:26.3.10.60
+          env:
+            - name: CLICKHOUSE_SKIP_USER_SETUP
+              value: "1"
+            - name: KAFKA_HOSTS
+              value: "posthog-redpanda:9092"
+          ports:
+            - name: http
+              containerPort: 8123
+            - name: native
+              containerPort: 9000
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/bash
+                  - -ec
+                  - |
+                    for _ in $(seq 1 120); do
+                      clickhouse-client --query "CREATE TABLE IF NOT EXISTS system.crash_log (event_date Date, event_time DateTime, hostname String) ENGINE = MergeTree ORDER BY event_time" && exit 0
+                      sleep 1
+                    done
+                    exit 1
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: config
+              mountPath: /etc/clickhouse-server/config.d/posthog.xml
+              subPath: posthog.xml
+            - name: config
+              mountPath: /etc/clickhouse-server/users.d/users-posthog.xml
+              subPath: users-posthog.xml
+      volumes:
+        - name: config
+          configMap:
+            name: posthog-clickhouse-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-clickhouse
+  labels:
+    app.kubernetes.io/name: posthog-clickhouse
+    app.kubernetes.io/part-of: posthog
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: posthog-clickhouse
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+    - name: native
+      port: 9000
+      targetPort: native

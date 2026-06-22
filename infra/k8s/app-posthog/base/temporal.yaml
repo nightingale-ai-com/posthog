@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: posthog-temporal-dynamicconfig
+  labels:
+    app.kubernetes.io/name: posthog-temporal
+    app.kubernetes.io/part-of: posthog
+data:
+  development-sql.yaml: |
+    limit.maxIDLength:
+      - value: 255
+        constraints: {}
+    system.forceSearchAttributesCacheRefreshOnRead:
+      - value: true
+        constraints: {}
+    system.visibilityDisableOrderByClause:
+      - value: false
+        constraints: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-temporal
+  labels:
+    app.kubernetes.io/name: posthog-temporal
+    app.kubernetes.io/part-of: posthog
+spec:
+  strategy:
+    type: Recreate
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-temporal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-temporal
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: temporal
+          image: docker.io/temporalio/auto-setup:1.26.2
+          env:
+            - name: DB
+              value: postgres12
+            - name: DBNAME
+              value: temporal
+            - name: VISIBILITY_DBNAME
+              value: temporal_visibility
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_SEEDS
+              value: posthog-postgres-cnpg-rw
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-app-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-app-secrets
+                  key: POSTGRES_PWD
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: config/dynamicconfig/development-sql.yaml
+            - name: ENABLE_ES
+              value: "false"
+            - name: BIND_ON_IP
+              value: "0.0.0.0"
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: TEMPORAL_ADDRESS
+              value: "127.0.0.1:7233"
+          ports:
+            - name: grpc
+              containerPort: 7233
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: dynamicconfig
+              mountPath: /etc/temporal/config/dynamicconfig/development-sql.yaml
+              subPath: development-sql.yaml
+      volumes:
+        - name: dynamicconfig
+          configMap:
+            name: posthog-temporal-dynamicconfig
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-temporal
+  labels:
+    app.kubernetes.io/name: posthog-temporal
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-temporal
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: grpc

@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: posthog-browserless
+  labels:
+    app.kubernetes.io/name: posthog-browserless
+    app.kubernetes.io/part-of: posthog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-browserless
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: posthog-browserless
+        app.kubernetes.io/part-of: posthog
+    spec:
+      containers:
+        - name: browserless
+          image: ghcr.io/browserless/chromium:v2.51.2
+          env:
+            - name: TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: posthog-app-secrets
+                  key: BROWSERLESS_TOKEN
+          ports:
+            - name: http
+              containerPort: 3000
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: posthog-browserless
+  labels:
+    app.kubernetes.io/name: posthog-browserless
+    app.kubernetes.io/part-of: posthog
+spec:
+  selector:
+    app.kubernetes.io/name: posthog-browserless
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

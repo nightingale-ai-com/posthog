@@ -1,0 +1,39 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: posthog-postgres-cnpg
+  labels:
+    app.kubernetes.io/name: posthog-postgres
+    app.kubernetes.io/part-of: posthog
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.9
+  bootstrap:
+    initdb:
+      database: posthog
+      owner: posthog
+      secret:
+        name: posthog-postgres-secrets
+      postInitApplicationSQL:
+        - ALTER ROLE posthog CREATEDB
+        - CREATE DATABASE posthog_persons OWNER posthog
+        - CREATE DATABASE behavioral_cohorts OWNER posthog
+        - CREATE DATABASE flags_read_store OWNER posthog
+        - CREATE DATABASE cyclotron OWNER posthog
+        - CREATE DATABASE cyclotron_node OWNER posthog
+        - CREATE DATABASE temporal OWNER posthog
+        - CREATE DATABASE temporal_visibility OWNER posthog
+  storage:
+    size: 10Gi
+    storageClass: local-path
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  postgresql:
+    parameters:
+      max_connections: "300"
+      shared_buffers: 512MB
