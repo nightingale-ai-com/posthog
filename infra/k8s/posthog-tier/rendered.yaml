@@ -1679,6 +1679,11 @@ spec:
         - /bin/bash
         - -ec
         - ./bin/migrate && ./bin/docker-server
+        env:
+        - name: NGINX_UNIT_PRELOAD_CONFIG
+          value: "true"
+        - name: NGINX_UNIT_APP_PROCESSES
+          value: "2"
         envFrom:
         - configMapRef:
             name: posthog-app-config
@@ -1689,8 +1694,9 @@ spec:
           httpGet:
             path: /_health
             port: http
-          initialDelaySeconds: 180
+          initialDelaySeconds: 600
           periodSeconds: 20
+          timeoutSeconds: 5
         name: web
         ports:
         - containerPort: 8000
@@ -1704,6 +1710,7 @@ spec:
             port: http
           initialDelaySeconds: 60
           periodSeconds: 10
+          timeoutSeconds: 5
         resources:
           limits:
             cpu: "2"
