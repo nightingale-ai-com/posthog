@@ -153,6 +153,11 @@ metadata:
     app.kubernetes.io/part-of: posthog
 spec:
   backoffLimit: 6
+  manualSelector: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: posthog-kafka-init
+      app.kubernetes.io/part-of: posthog
   template:
     metadata:
       labels:
