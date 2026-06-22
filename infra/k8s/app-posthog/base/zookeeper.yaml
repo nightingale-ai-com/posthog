@@ -25,6 +25,8 @@ spec:
               value: "1"
             - name: ZOO_AUTOPURGE_SNAPRETAINCOUNT
               value: "3"
+            - name: ZK_SERVER_HEAP
+              value: "512"
           ports:
             - name: client
               containerPort: 2181
@@ -42,10 +44,10 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 512Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
           volumeMounts:
             - name: data
               mountPath: /data

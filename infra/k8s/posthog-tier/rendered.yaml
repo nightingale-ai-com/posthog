@@ -2162,6 +2162,8 @@ spec:
           value: "1"
         - name: ZOO_AUTOPURGE_SNAPRETAINCOUNT
           value: "3"
+        - name: ZK_SERVER_HEAP
+          value: "512"
         image: docker.io/zookeeper:3.7.0
         livenessProbe:
           initialDelaySeconds: 60
@@ -2181,10 +2183,10 @@ spec:
         resources:
           limits:
             cpu: 500m
-            memory: 512Mi
+            memory: 1Gi
           requests:
             cpu: 100m
-            memory: 256Mi
+            memory: 512Mi
         volumeMounts:
         - mountPath: /data
           name: data
