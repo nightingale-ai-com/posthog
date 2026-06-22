@@ -1,6 +1,8 @@
 # Fleet bundle for the PostHog homedev tier. The home-dev-infra GitRepo should
 # path-scope to this directory so this bundle stays self-contained.
 defaultNamespace: posthog
+helm:
+  takeOwnership: true
 diff:
   comparePatches:
     - apiVersion: v1
